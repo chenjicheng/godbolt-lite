@@ -359,7 +359,73 @@ func ensurePathInside(root, target string) error {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("target %q escapes root %q", absTarget, absRoot)
 	}
+
+	resolvedRoot, err := resolvedPathForContainment(absRoot)
+	if err != nil {
+		return err
+	}
+	resolvedTarget, err := resolvedPathForContainment(absTarget)
+	if err != nil {
+		return err
+	}
+	rel, err = filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("target %q resolves outside root %q", absTarget, absRoot)
+	}
 	return nil
+}
+
+func resolvedPathForContainment(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+
+	base, parts := splitAbsolutePath(absPath)
+	currentLexical := base
+	currentResolved := base
+	for index, part := range parts {
+		currentLexical = filepath.Join(currentLexical, part)
+		currentResolved = filepath.Join(currentResolved, part)
+
+		info, err := os.Lstat(currentLexical)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				resolved, err := filepath.EvalSymlinks(currentLexical)
+				if err != nil {
+					return "", err
+				}
+				currentResolved = resolved
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		remaining := append([]string{currentResolved}, parts[index+1:]...)
+		return filepath.Abs(filepath.Join(remaining...))
+	}
+	return filepath.Abs(currentResolved)
+}
+
+func splitAbsolutePath(absPath string) (string, []string) {
+	volume := filepath.VolumeName(absPath)
+	rest := absPath[len(volume):]
+	base := volume
+	if strings.HasPrefix(rest, string(filepath.Separator)) {
+		base += string(filepath.Separator)
+		rest = strings.TrimLeft(rest, `/\`)
+	}
+	if base == "" {
+		base = string(filepath.Separator)
+	}
+	parts := strings.FieldsFunc(rest, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	return base, parts
 }
 
 func defaultProjectState() ProjectState {

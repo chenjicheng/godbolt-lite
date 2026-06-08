@@ -46,9 +46,68 @@ func TestPrepareRunCompilerArgsOmitsLinuxTargetWithNote(t *testing.T) {
 	}
 }
 
+func TestPrepareRunCompilerArgsOmitsDoubleDashLinuxTargetWithNote(t *testing.T) {
+	args, note, err := prepareRunCompilerArgs([]string{
+		"--target", "x86_64-pc-linux-gnu",
+		"-Og",
+	})
+	if err != nil {
+		t.Fatalf("prepareRunCompilerArgs failed: %v", err)
+	}
+	if note == "" {
+		t.Fatal("expected Linux target note")
+	}
+	if len(args) != 1 || args[0] != "-Og" {
+		t.Fatalf("args = %#v, want only -Og", args)
+	}
+}
+
 func TestPrepareRunCompilerArgsRejectsAssemblyOnlyMode(t *testing.T) {
 	if _, _, err := prepareRunCompilerArgs([]string{"-Og", "-S"}); err == nil {
 		t.Fatal("prepareRunCompilerArgs accepted -S")
+	}
+}
+
+func TestValidateCompilerArgsRejectsUnsafeInputs(t *testing.T) {
+	projectDir := t.TempDir()
+	includeDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+
+	cases := [][]string{
+		{"scratch.c"},
+		{"@args.rsp"},
+		{"--", "scratch.c"},
+		{"-o", "out.exe"},
+		{"-Xclang", "-load"},
+		{"-I", filepath.Join(outsideDir, "include")},
+		{"-fuse-ld", filepath.Join(outsideDir, "lld-link.exe")},
+	}
+	for _, args := range cases {
+		if err := compiler.validateCompilerArgs(args); err == nil {
+			t.Fatalf("validateCompilerArgs(%#v) succeeded, want error", args)
+		}
+	}
+}
+
+func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
+	projectDir := t.TempDir()
+	includeDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+
+	args := []string{
+		"-Og",
+		"-g0",
+		"-std=c17",
+		"-D", "NAME=1",
+		"-I", filepath.Join(projectDir, "headers"),
+		"-include", "config.h",
+		"-fuse-ld=lld",
+	}
+	if err := compiler.validateCompilerArgs(args); err != nil {
+		t.Fatalf("validateCompilerArgs failed: %v", err)
 	}
 }
 

@@ -91,6 +91,11 @@ func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileRespo
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
+	if err := c.validateCompilerArgs(compilerArgs); err != nil {
+		resp.Error = err.Error()
+		resp.DurationMs = time.Since(start).Milliseconds()
+		return resp
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -107,7 +112,7 @@ func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileRespo
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err = runCommand(ctx, cmd)
 	resp.ASM = stdout.String()
 	resp.Stderr = stderr.String()
 	resp.DurationMs = time.Since(start).Milliseconds()
@@ -160,6 +165,11 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
+	if err := c.validateCompilerArgs(compilerArgs); err != nil {
+		resp.Error = err.Error()
+		resp.DurationMs = time.Since(start).Milliseconds()
+		return resp
+	}
 	resp.Note = note
 	if runtime.GOOS == "windows" && c.lldLink == "" && !hasLinkerChoice(compilerArgs) {
 		resp.Error = "Run needs a Windows linker. Add lld-link.exe next to clang.exe, install LLVM with lld-link on PATH, or pass a working linker option."
@@ -174,14 +184,25 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 		return resp
 	}
 
-	runDir := filepath.Join(absPath(c.projectDir), ".mini-godbolt-run")
+	runRoot := filepath.Join(absPath(c.projectDir), ".mini-godbolt-run")
+	runDir := filepath.Join(runRoot, runArtifactName(req.RequestID, start))
+	if err := ensurePathInside(c.projectDir, runRoot); err != nil {
+		resp.Error = err.Error()
+		resp.DurationMs = time.Since(start).Milliseconds()
+		return resp
+	}
+	if err := ensurePathInside(runRoot, runDir); err != nil {
+		resp.Error = err.Error()
+		resp.DurationMs = time.Since(start).Milliseconds()
+		return resp
+	}
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
-	exePath := exeName(filepath.Join(runDir, runArtifactName(req.RequestID, start)))
-	defer os.Remove(exePath)
+	defer os.RemoveAll(runDir)
+	exePath := exeName(filepath.Join(runDir, "program"))
 	_ = os.Remove(exePath)
 
 	buildCtx, cancelBuild := context.WithTimeout(ctx, 8*time.Second)
@@ -204,7 +225,7 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 	buildCmd.Stdout = &buildStdout
 	buildCmd.Stderr = &buildStderr
 
-	err = buildCmd.Run()
+	err = runCommand(buildCtx, buildCmd)
 	resp.Stderr = combineOutput(buildStdout.String(), buildStderr.String())
 	resp.DurationMs = time.Since(start).Milliseconds()
 	if buildCtx.Err() != nil {
@@ -234,7 +255,7 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
 
-	err = runCmd.Run()
+	err = runCommand(runCtx, runCmd)
 	resp.Stdout = stdout.String()
 	resp.Stderr = combineOutput(resp.Stderr, stderr.String())
 	resp.DurationMs = time.Since(start).Milliseconds()
@@ -308,6 +329,169 @@ func (c *Compiler) commandEnv() []string {
 		}
 	}
 	return append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func (c *Compiler) validateCompilerArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "" {
+			continue
+		}
+		if strings.HasPrefix(arg, "@") {
+			return fmt.Errorf("response files are not allowed in compiler arguments: %s", arg)
+		}
+		if arg == "--" {
+			return errors.New("positional compiler inputs are not allowed")
+		}
+		if isUnsafeCompilerFlag(arg) {
+			return fmt.Errorf("compiler argument %s is not allowed here", arg)
+		}
+
+		if flag, value, consumed, ok := compilerPathFlagValue(args, i); ok {
+			if err := c.validateCompilerArgPath(flag, value); err != nil {
+				return err
+			}
+			if consumed {
+				i++
+			}
+			continue
+		}
+
+		if arg == "-fuse-ld" {
+			if i+1 >= len(args) {
+				return errors.New("-fuse-ld requires a value")
+			}
+			value := args[i+1]
+			if value == "" {
+				return errors.New("-fuse-ld requires a value")
+			}
+			if looksLikePath(value) {
+				if err := c.validateCompilerArgPath("-fuse-ld", value); err != nil {
+					return err
+				}
+			}
+			i++
+			continue
+		}
+
+		if flagConsumesNextValue(arg) {
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", arg)
+			}
+			i++
+			continue
+		}
+
+		if strings.HasPrefix(arg, "-fuse-ld=") {
+			value := strings.TrimPrefix(arg, "-fuse-ld=")
+			if value == "" {
+				return errors.New("-fuse-ld requires a value")
+			}
+			if looksLikePath(value) {
+				if err := c.validateCompilerArgPath("-fuse-ld", value); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
+		if !strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("positional compiler input %q is not allowed; add project files through the file list", arg)
+		}
+	}
+	return nil
+}
+
+func isUnsafeCompilerFlag(arg string) bool {
+	switch arg {
+	case "-Xclang", "-Xlinker", "-Xassembler", "-mllvm", "-cc1", "-o", "--output", "/link",
+		"-MD", "-MMD", "-M", "-MM", "-MF", "-MT", "-MQ", "-MJ", "-save-temps", "-save-temps=cwd",
+		"-save-temps=obj", "-serialize-diagnostics", "--serialize-diagnostics", "-dependency-file":
+		return true
+	}
+	unsafePrefixes := []string{
+		"-Wl,", "-Wa,", "-Wp,", "-fplugin", "-load", "--config", "-MJ", "-MF", "-MT", "-MQ",
+		"-dependency-file", "-serialize-diagnostics", "--serialize-diagnostics", "-ftime-trace",
+		"-fprofile", "-fcoverage", "--coverage", "-dumpdir", "-save-temps",
+	}
+	for _, prefix := range unsafePrefixes {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(arg, "-o") && arg != "-Og" {
+		return true
+	}
+	return false
+}
+
+func compilerPathFlagValue(args []string, index int) (flag, value string, consumed bool, ok bool) {
+	arg := args[index]
+	switch arg {
+	case "-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros", "-include-pch", "-isysroot", "--sysroot", "-B", "-L":
+		if index+1 >= len(args) {
+			return arg, "", false, true
+		}
+		return arg, args[index+1], true, true
+	}
+	for _, prefix := range []string{"-I", "-B", "-L"} {
+		if strings.HasPrefix(arg, prefix) && len(arg) > len(prefix) {
+			return prefix, strings.TrimPrefix(arg, prefix), false, true
+		}
+	}
+	if strings.HasPrefix(arg, "--sysroot=") {
+		return "--sysroot", strings.TrimPrefix(arg, "--sysroot="), false, true
+	}
+	return "", "", false, false
+}
+
+func flagConsumesNextValue(arg string) bool {
+	switch arg {
+	case "-x", "-std", "-target", "--target", "-arch", "-march", "-mcpu", "-mtune", "-mfpmath", "-D", "-U":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Compiler) validateCompilerArgPath(flag, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s requires a path", flag)
+	}
+	if strings.HasPrefix(value, "@") {
+		return fmt.Errorf("response-file path %q is not allowed", value)
+	}
+
+	var candidates []string
+	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		candidates = []string{value}
+	} else {
+		for _, root := range c.allowedCompilerArgRoots() {
+			if root != "" {
+				candidates = append(candidates, filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(value, "\\", "/"))))
+			}
+		}
+	}
+
+	for _, candidate := range candidates {
+		for _, root := range c.allowedCompilerArgRoots() {
+			if root == "" {
+				continue
+			}
+			if err := ensurePathInside(root, candidate); err == nil {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("%s path %q must stay inside the project, include, or system include folders", flag, value)
+}
+
+func (c *Compiler) allowedCompilerArgRoots() []string {
+	return []string{c.projectDir, c.includeDir, c.systemIncludeDir}
+}
+
+func looksLikePath(value string) bool {
+	return filepath.IsAbs(value) || filepath.VolumeName(value) != "" || strings.HasPrefix(value, ".") || strings.ContainsAny(value, `/\`)
 }
 
 func (c *Compiler) runSourcePaths(activeSourcePath string) ([]string, error) {
@@ -477,9 +661,9 @@ func prepareRunCompilerArgs(args []string) ([]string, string, error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "-target":
+		case arg == "-target" || arg == "--target":
 			if i+1 >= len(args) {
-				return nil, "", errors.New("-target requires a target triple")
+				return nil, "", fmt.Errorf("%s requires a target triple", arg)
 			}
 			target := args[i+1]
 			i++

@@ -48,7 +48,7 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 	}
 
 	if rel, ok := pathRelIfInside(s.cfg.ProjectDir, absPath); ok {
-		data, err := os.ReadFile(absPath)
+		data, err := readRegularSourceFile(absPath)
 		if err != nil {
 			return SourceReadResponse{}, err
 		}
@@ -61,13 +61,26 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 	}
 
 	if rel, ok := pathRelIfInside(s.cfg.IncludeDir, absPath); ok {
-		data, err := os.ReadFile(absPath)
+		data, err := readRegularSourceFile(absPath)
 		if err != nil {
 			return SourceReadResponse{}, err
 		}
 		return SourceReadResponse{
 			URI:      uri,
 			Path:     "external/include/" + filepath.ToSlash(rel),
+			Content:  string(data),
+			ReadOnly: true,
+		}, nil
+	}
+
+	if rel, ok := pathRelIfInside(s.cfg.SystemIncludeDir, absPath); ok {
+		data, err := readRegularSourceFile(absPath)
+		if err != nil {
+			return SourceReadResponse{}, err
+		}
+		return SourceReadResponse{
+			URI:      uri,
+			Path:     "external/system/" + filepath.ToSlash(rel),
 			Content:  string(data),
 			ReadOnly: true,
 		}, nil
@@ -81,6 +94,9 @@ func pathRelIfInside(root, target string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	if err := ensurePathInside(absRoot, target); err != nil {
+		return "", false
+	}
 	rel, err := filepath.Rel(absRoot, target)
 	if err != nil {
 		return "", false
@@ -89,6 +105,17 @@ func pathRelIfInside(root, target string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+func readRegularSourceFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("source URI is not a regular file")
+	}
+	return os.ReadFile(path)
 }
 
 func fileURIToPath(raw string) (string, error) {

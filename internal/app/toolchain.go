@@ -12,10 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 //go:embed toolchains/*
 var embeddedToolchains embed.FS
+
+const toolchainReadyMarker = ".mini-godbolt-toolchain-ready"
 
 type Toolchain struct {
 	Clang   string
@@ -50,7 +53,7 @@ func discoverSidecarToolchain(exeDir string) (Toolchain, bool) {
 		LLDLink: exeName(filepath.Join(root, "bin", "lld-link")),
 		Root:    root,
 	}
-	return tc, fileExists(tc.Clang) && fileExists(tc.Clangd)
+	return tc, fileExists(tc.Clang) && fileExists(tc.Clangd) && fileExists(tc.LLDLink)
 }
 
 func discoverEmbeddedToolchain(cacheDir string) (Toolchain, bool) {
@@ -61,7 +64,7 @@ func discoverEmbeddedToolchain(cacheDir string) (Toolchain, bool) {
 		LLDLink: exeName(filepath.Join(root, "bin", "lld-link")),
 		Root:    root,
 	}
-	return tc, fileExists(tc.Clang) && fileExists(tc.Clangd)
+	return tc, fileExists(filepath.Join(root, toolchainReadyMarker)) && fileExists(tc.Clang) && fileExists(tc.Clangd) && fileExists(tc.LLDLink)
 }
 
 func extractEmbeddedToolchain(cacheDir string) (Toolchain, error) {
@@ -102,12 +105,23 @@ func extractZipBytes(cacheDir string, data []byte) (Toolchain, error) {
 
 func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 	root := filepath.Join(cacheDir, "toolchains", "llvm-windows-amd64")
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	parent := filepath.Dir(root)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return Toolchain{}, err
 	}
+	tempRoot, err := os.MkdirTemp(parent, "llvm-windows-amd64-*")
+	if err != nil {
+		return Toolchain{}, err
+	}
+	defer os.RemoveAll(tempRoot)
+
 	for _, file := range zr.File {
-		target := filepath.Join(root, filepath.Clean(file.Name))
-		if err := ensurePathInside(root, target); err != nil {
+		cleanName := filepath.Clean(strings.ReplaceAll(file.Name, "\\", "/"))
+		if cleanName == "." || filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." {
+			return Toolchain{}, fmt.Errorf("embedded LLVM archive contains unsafe path %q", file.Name)
+		}
+		target := filepath.Join(tempRoot, cleanName)
+		if err := ensurePathInside(tempRoot, target); err != nil {
 			return Toolchain{}, err
 		}
 		if file.FileInfo().IsDir() {
@@ -134,16 +148,32 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 			return Toolchain{}, err
 		}
 	}
+	if err := os.WriteFile(filepath.Join(tempRoot, toolchainReadyMarker), []byte("ready\n"), 0o644); err != nil {
+		return Toolchain{}, err
+	}
+
 	tc := Toolchain{
-		Clang:   exeName(filepath.Join(root, "bin", "clang")),
-		Clangd:  exeName(filepath.Join(root, "bin", "clangd")),
-		LLDLink: exeName(filepath.Join(root, "bin", "lld-link")),
-		Root:    root,
+		Clang:   exeName(filepath.Join(tempRoot, "bin", "clang")),
+		Clangd:  exeName(filepath.Join(tempRoot, "bin", "clangd")),
+		LLDLink: exeName(filepath.Join(tempRoot, "bin", "lld-link")),
+		Root:    tempRoot,
 	}
-	if !fileExists(tc.Clang) || !fileExists(tc.Clangd) {
-		return Toolchain{}, fmt.Errorf("embedded LLVM archive extracted but clang/clangd were not found under %s", filepath.Join(root, "bin"))
+	if !fileExists(tc.Clang) || !fileExists(tc.Clangd) || !fileExists(tc.LLDLink) {
+		return Toolchain{}, fmt.Errorf("embedded LLVM archive extracted but clang/clangd/lld-link were not found under %s", filepath.Join(tempRoot, "bin"))
 	}
-	return tc, nil
+	if err := ensurePathInside(parent, root); err != nil {
+		return Toolchain{}, err
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return Toolchain{}, err
+	}
+	if err := os.Rename(tempRoot, root); err != nil {
+		return Toolchain{}, err
+	}
+	if tc, ok := discoverEmbeddedToolchain(cacheDir); ok {
+		return tc, nil
+	}
+	return Toolchain{}, fmt.Errorf("embedded LLVM archive extracted but validated toolchain was not found under %s", root)
 }
 
 func discoverPATHToolchain() (Toolchain, bool) {

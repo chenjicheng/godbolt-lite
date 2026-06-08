@@ -15,6 +15,70 @@ $fullDir = Join-Path $extractDir "clang+llvm-$Version-x86_64-pc-windows-msvc"
 $toolchainDir = Join-Path $root "dist\toolchain"
 $zipPath = Join-Path $root "internal\app\toolchains\llvm-windows-amd64.zip"
 
+function New-ToolchainZip {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDir,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path $DestinationPath) {
+        Remove-Item -LiteralPath $DestinationPath -Force
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestinationPath) | Out-Null
+
+    $sourceRoot = (Resolve-Path $SourceDir).Path.TrimEnd([char[]]@("\", "/"))
+    $zip = [System.IO.Compression.ZipFile]::Open($DestinationPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
+            $entryName = $_.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip,
+                $_.FullName,
+                $entryName,
+                [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
+function Assert-ToolchainZipShape {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ZipPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $ZipPath).Path)
+    try {
+        $entryNames = @(
+            $zip.Entries |
+                ForEach-Object { $_.FullName.Replace("\", "/").TrimStart([char[]]@("/")) }
+        )
+        foreach ($required in @("bin/clang.exe", "bin/clangd.exe", "bin/lld-link.exe")) {
+            if ($entryNames -notcontains $required) {
+                throw "Toolchain zip is missing $required."
+            }
+        }
+        $hasClangResourceHeader = $false
+        foreach ($entry in $entryNames) {
+            if ($entry -match '^lib/clang/[^/]+/include/stddef\.h$') {
+                $hasClangResourceHeader = $true
+                break
+            }
+        }
+        if (-not $hasClangResourceHeader) {
+            throw "Toolchain zip is missing lib/clang/<version>/include/stddef.h."
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null
 
 if (-not (Test-Path $archive)) {
@@ -50,10 +114,8 @@ Copy-Item (Join-Path $fullDir "bin\clangd.exe") (Join-Path $toolchainDir "bin\cl
 Copy-Item (Join-Path $fullDir "bin\lld-link.exe") (Join-Path $toolchainDir "bin\lld-link.exe") -Force
 Copy-Item $clangResourceDir.FullName (Join-Path $toolchainDir "lib\clang\$($clangResourceDir.Name)") -Recurse -Force
 
-if (Test-Path $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
-Compress-Archive -Path (Join-Path $toolchainDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
+New-ToolchainZip -SourceDir $toolchainDir -DestinationPath $zipPath
+Assert-ToolchainZipShape -ZipPath $zipPath
 
 Write-Host "Prepared slim LLVM toolchain at dist\toolchain"
 Write-Host "Prepared embedded toolchain zip at internal\app\toolchains\llvm-windows-amd64.zip"

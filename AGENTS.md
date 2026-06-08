@@ -40,6 +40,7 @@ Important backend endpoints:
 - Do not revert user changes unless the user explicitly asks.
 - Keep edits scoped to the requested behavior.
 - Prefer existing local patterns over new abstractions.
+- Prefer mature, maintained libraries for protocol parsing, network framing, archive handling, process isolation, language parsing, and other security-sensitive primitives. Do not hand-roll these when a practical library is available.
 - Use `rg` for search.
 - Use `apply_patch` for manual file edits.
 - Avoid destructive filesystem operations. If cleanup is needed, identify exact targets first.
@@ -211,4 +212,3 @@ Severity guide:
 - High: reproducible crash, broken release build, unsafe toolchain extraction, or compile/run behavior that violates the app contract.
 - Medium: stale UI state, LSP lifecycle bugs, misleading diagnostics, incomplete cleanup, or missing tests for important behavior.
 - Low: polish, documentation drift, minor UX inconsistency, or test coverage gaps without immediate behavioral breakage.
-

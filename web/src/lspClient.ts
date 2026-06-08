@@ -30,10 +30,12 @@ interface JsonRpcMessage {
 interface PendingRequest<T = unknown> {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
+  timeoutId: number;
 }
 
 const owner = "lsp";
 const reconnectDelayMs = 1500;
+const requestTimeoutMs = 10000;
 
 export function attachLspClient(options: LspClientOptions): LspHandle {
   const { monaco, editor, languageId, rootUri, getModels, onStatus } = options;
@@ -128,6 +130,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       const request = pending.get(message.id);
       pending.delete(message.id);
       if (!request) return;
+      window.clearTimeout(request.timeoutId);
       if (message.error) {
         request.reject(new Error(message.error.message));
       } else {
@@ -159,7 +162,11 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
     socket.send(JSON.stringify(message));
 
     return new Promise<T>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      const timeoutId = window.setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`${method} timed out`));
+      }, requestTimeoutMs);
+      pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timeoutId });
     });
   }
 
@@ -258,6 +265,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
 
   function rejectPending(message: string) {
     for (const item of pending.values()) {
+      window.clearTimeout(item.timeoutId);
       item.reject(new Error(message));
     }
     pending.clear();

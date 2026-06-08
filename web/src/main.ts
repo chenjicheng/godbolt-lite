@@ -195,6 +195,9 @@ const readOnlyFiles = new Map<string, ProjectFile>();
 const readOnlyByUri = new Map<string, string>();
 let compileTimer: number | undefined;
 let syncTimer: number | undefined;
+let syncVersion = 0;
+let syncQueue: Promise<void> = Promise.resolve();
+let toolRunRevision = 0;
 let latestCompileId = "";
 let latestRunId = "";
 let lsp: LspHandle | undefined;
@@ -877,7 +880,7 @@ async function renameFile(oldPath: string, nextPathInput: string): Promise<boole
 
   try {
     statusEl.textContent = "Saving";
-    project = await syncProject(nextProject);
+    project = await persistProjectNow(nextProject);
   } catch (err) {
     statusEl.textContent = "Save failed";
     setDiagnostics(String(err));
@@ -920,7 +923,7 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
   const model = models.get(path);
   try {
     statusEl.textContent = "Saving";
-    project = await syncProject(nextProject);
+    project = await persistProjectNow(nextProject);
   } catch (err) {
     statusEl.textContent = "Save failed";
     setDiagnostics(String(err));
@@ -949,21 +952,26 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
 
 function scheduleSync(): void {
   window.clearTimeout(syncTimer);
+  const version = nextSyncVersion();
   syncTimer = window.setTimeout(() => {
-    void syncProject(cloneProject(project)).catch((err) => {
-      setDiagnostics(String(err));
+    syncTimer = undefined;
+    void queueProjectSync(projectSnapshotForToolRun(), version).catch((err) => {
+      if (version === syncVersion) setDiagnostics(String(err));
     });
   }, 250);
 }
 
 function scheduleCompile(): void {
+  invalidateToolRuns();
   window.clearTimeout(compileTimer);
   compileTimer = window.setTimeout(() => {
-    void runCompile();
+    void runCompile(toolRunRevision);
   }, 600);
 }
 
-async function runCompile(): Promise<void> {
+async function runCompile(revision = toolRunRevision): Promise<void> {
+  window.clearTimeout(compileTimer);
+  compileTimer = undefined;
   if (!project.activeFile.endsWith(".c")) {
     statusEl.textContent = "Open a .c file to compile";
     return;
@@ -973,9 +981,9 @@ async function runCompile(): Promise<void> {
 
   const snapshot = projectSnapshotForToolRun();
   try {
-    await syncProject(snapshot);
+    await persistProjectForToolRun(snapshot);
   } catch (err) {
-    if (requestId !== latestCompileId) return;
+    if (requestId !== latestCompileId || revision !== toolRunRevision) return;
     renderCompile({
       ok: false,
       asm: "",
@@ -987,7 +995,7 @@ async function runCompile(): Promise<void> {
     });
     return;
   }
-  if (requestId !== latestCompileId) return;
+  if (requestId !== latestCompileId || revision !== toolRunRevision) return;
 
   statusEl.textContent = "Compiling";
   const result = await compile(snapshot.activeFile, snapshot.compilerArgs, requestId).catch((err) => ({
@@ -999,14 +1007,18 @@ async function runCompile(): Promise<void> {
     requestId,
     error: String(err)
   }));
-  if (result.requestId !== latestCompileId) return;
+  if (result.requestId !== latestCompileId || revision !== toolRunRevision) return;
   renderCompile(result);
   if (result.ok && autoRunEl.checked) {
-    void executeProgram(snapshot, true);
+    void executeProgram(snapshot, true, revision);
   }
 }
 
-async function executeProgram(snapshot = projectSnapshotForToolRun(), alreadySynced = false): Promise<void> {
+async function executeProgram(
+  snapshot = projectSnapshotForToolRun(),
+  alreadySynced = false,
+  revision = toolRunRevision
+): Promise<void> {
   if (!snapshot.activeFile.endsWith(".c")) {
     statusEl.textContent = "Open a .c file to run";
     return;
@@ -1016,9 +1028,9 @@ async function executeProgram(snapshot = projectSnapshotForToolRun(), alreadySyn
 
   if (!alreadySynced) {
     try {
-      await syncProject(snapshot);
+      await persistProjectForToolRun(snapshot);
     } catch (err) {
-      if (requestId !== latestRunId) return;
+      if (requestId !== latestRunId || revision !== toolRunRevision) return;
       renderRun({
         ok: false,
         stdout: "",
@@ -1031,7 +1043,7 @@ async function executeProgram(snapshot = projectSnapshotForToolRun(), alreadySyn
       return;
     }
   }
-  if (requestId !== latestRunId) return;
+  if (requestId !== latestRunId || revision !== toolRunRevision) return;
 
   statusEl.textContent = "Running";
   setRunOutput("Running...");
@@ -1044,17 +1056,59 @@ async function executeProgram(snapshot = projectSnapshotForToolRun(), alreadySyn
     requestId,
     error: String(err)
   }));
-  if (result.requestId !== latestRunId) return;
+  if (result.requestId !== latestRunId || revision !== toolRunRevision) return;
   renderRun(result);
 }
 
 function projectSnapshotForToolRun(): ProjectState {
-  if (activeModel) {
-    const current = project.files.find((item) => item.path === project.activeFile);
-    if (current) current.content = activeModel.getValue();
+  for (const [path, model] of models) {
+    if (readOnlyFiles.has(path)) continue;
+    const current = project.files.find((item) => pathsEqual(item.path, path));
+    if (current) current.content = model.getValue();
   }
   project.compilerArgs = compilerArgsEl.value.trim() || defaultCompilerArgs;
   return cloneProject(project);
+}
+
+function nextSyncVersion(): number {
+  syncVersion += 1;
+  return syncVersion;
+}
+
+function cancelScheduledSync(): void {
+  window.clearTimeout(syncTimer);
+  syncTimer = undefined;
+}
+
+function persistProjectNow(snapshot: ProjectState): Promise<ProjectState> {
+  cancelScheduledSync();
+  return queueProjectSync(snapshot, nextSyncVersion());
+}
+
+function persistProjectForToolRun(snapshot: ProjectState): Promise<ProjectState> {
+  cancelScheduledSync();
+  return queueProjectSync(snapshot, nextSyncVersion());
+}
+
+function queueProjectSync(snapshot: ProjectState, version: number): Promise<ProjectState> {
+  const task = syncQueue
+    .catch(() => undefined)
+    .then(() => syncProject(snapshot))
+    .then((saved) => {
+      if (version === syncVersion) project = saved;
+      return saved;
+    });
+  syncQueue = task.then(
+    () => undefined,
+    () => undefined
+  );
+  return task;
+}
+
+function invalidateToolRuns(): void {
+  toolRunRevision += 1;
+  latestCompileId = "";
+  latestRunId = "";
 }
 
 function renderCompile(result: CompileResponse): void {
@@ -1390,7 +1444,9 @@ function readInitialConsoleHeight(): number | undefined {
 
 function readStoredFontScale(storageKey: string): number | undefined {
   try {
-    const stored = Number(localStorage.getItem(storageKey));
+    const raw = localStorage.getItem(storageKey);
+    if (raw === null || raw.trim() === "") return undefined;
+    const stored = Number(raw);
     if (Number.isFinite(stored)) return clampFontScale(stored);
   } catch {
     // Keep the default when persisted preferences cannot be read.
@@ -1400,7 +1456,9 @@ function readStoredFontScale(storageKey: string): number | undefined {
 
 function readStoredPixels(storageKey: string, min: number): number | undefined {
   try {
-    const stored = Number(localStorage.getItem(storageKey));
+    const raw = localStorage.getItem(storageKey);
+    if (raw === null || raw.trim() === "") return undefined;
+    const stored = Number(raw);
     if (Number.isFinite(stored)) return Math.max(min, Math.round(stored));
   } catch {
     // Keep CSS defaults when persisted layout preferences cannot be read.

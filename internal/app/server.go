@@ -24,6 +24,7 @@ type Server struct {
 	toolchainErr error
 	project      *ProjectStore
 	compiler     *Compiler
+	lspSlots     chan struct{}
 }
 
 func Run(ctx context.Context, args []string) error {
@@ -110,6 +111,7 @@ func NewServer(cfg Config) *Server {
 		toolchainErr: err,
 		project:      project,
 		compiler:     NewCompiler(tc.Clang, cfg.ProjectDir, cfg.IncludeDir, cfg.SystemIncludeDir),
+		lspSlots:     make(chan struct{}, 2),
 	}
 }
 

@@ -1,4 +1,6 @@
 .gocache/
+.gotmp/
+.tmp/
 node_modules/
 web/node_modules/
 internal/app/static/**

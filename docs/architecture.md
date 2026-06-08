@@ -10,6 +10,7 @@ include/
 toolchain/ (optional sidecar)
   bin/clang.exe
   bin/clangd.exe
+  bin/lld-link.exe
 ```
 
 The executable locates `include/` from `os.Executable()`, not from the process working directory.
@@ -37,12 +38,15 @@ The Go server exposes:
 - `POST /api/project/sync`
 - `POST /api/source/read`
 - `POST /api/compile`
+- `POST /api/run`
 - `GET /api/lsp`
 
 `/api/compile` compiles the active `.c` file to assembly only. It does not link and does not run user code.
 The UI sends a free-form clang argument string; the server still appends `-S -o -` so assembly is returned to the page.
 
-`/api/lsp` upgrades to WebSocket and bridges browser JSON-RPC messages to clangd's stdin/stdout LSP framing.
+`/api/run` links and executes the active program on the native Windows target. It derives the translation units from the active `.c` file and local quoted includes: a discovered `foo.h` pulls in sibling `foo.c` when present, but unrelated scratch `.c` files are left out. Linux `-target` flags are omitted for program execution because a Linux ABI binary cannot run directly on Windows.
+
+`/api/lsp` upgrades to WebSocket through a maintained WebSocket library and bridges browser JSON-RPC messages to clangd's stdin/stdout LSP framing.
 
 ## Frontend
 
@@ -57,6 +61,7 @@ Release builds embed a slimmed `internal/app/toolchains/llvm-windows-amd64.zip`.
 ```text
 bin/clang.exe
 bin/clangd.exe
+bin/lld-link.exe
 lib/clang/22/
 ```
 
