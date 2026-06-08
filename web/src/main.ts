@@ -1,0 +1,1684 @@
+import * as monaco from "monaco-editor";
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import "./styles.css";
+import { compile, fetchProject, fetchStatus, readSource, runProgram as runProgramApi, syncProject } from "./api";
+import { attachLspClient, type LspHandle } from "./lspClient";
+import type { CompileResponse, ProjectFile, ProjectState, RunResponse, StatusResponse } from "./types";
+
+const legacyDefaultCompilerArgs = "-Og -masm=intel -fno-asynchronous-unwind-tables";
+const windowsDefaultCompilerArgs = "-Og -g0 -fno-asynchronous-unwind-tables -fno-stack-protector -fno-ident -fno-addrsig";
+const linuxDefaultCompilerArgs =
+  "-target x86_64-pc-linux-gnu -Og -g0 -fno-asynchronous-unwind-tables -fno-stack-protector -fno-ident -fno-addrsig";
+const malformedLinuxDefaultCompilerArgs =
+  "-target -Og -g0 -fno-asynchronous-unwind-tables -fno-stack-protector -fno-ident -fno-addrsig";
+const defaultCompilerArgs = windowsDefaultCompilerArgs;
+
+self.MonacoEnvironment = {
+  getWorker: (_workerId: string, label: string) => {
+    if (label === "json") {
+      return new JsonWorker();
+    }
+    return new EditorWorker();
+  }
+};
+
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) throw new Error("missing #app");
+
+app.innerHTML = `
+  <div class="shell">
+    <header class="toolbar">
+      <div class="brand">Mini Godbolt</div>
+      <div class="controls">
+        <div class="args-presets" aria-label="Compiler argument presets">
+          <button id="args-windows" type="button">Win</button>
+          <button id="args-csapp" type="button">CSAPP</button>
+        </div>
+        <input id="compiler-args" aria-label="Compiler arguments" spellcheck="false" />
+        <button id="compile" type="button">Compile</button>
+        <button id="run" type="button">Run</button>
+        <label class="auto-run-control">
+          <input id="auto-run" type="checkbox" />
+          <span>Auto-run</span>
+        </label>
+      </div>
+      <div class="view-controls" aria-label="View controls">
+        <button id="toggle-files" type="button" aria-pressed="true">Files</button>
+        <button id="toggle-asm" type="button" aria-pressed="true">Asm</button>
+        <button id="toggle-console" type="button" aria-pressed="true">Console</button>
+      </div>
+      <div id="status" class="status">Starting</div>
+    </header>
+    <div id="workspace" class="workspace">
+      <aside class="sidebar">
+        <div class="sidebar-actions">
+          <button id="new-file" type="button">+ File</button>
+        </div>
+        <div id="files" class="file-list"></div>
+      </aside>
+      <div id="sidebar-resizer" class="layout-resizer layout-resizer-vertical" role="separator" aria-label="Resize file list" aria-orientation="vertical" tabindex="0"></div>
+      <section class="editor-pane">
+        <div id="tabs" class="tabs"></div>
+        <div id="editor" class="editor"></div>
+      </section>
+      <div id="asm-resizer" class="layout-resizer layout-resizer-vertical" role="separator" aria-label="Resize assembly pane" aria-orientation="vertical" tabindex="0"></div>
+      <section class="asm-pane">
+        <div class="panel-title asm-title">
+          <span>Assembly</span>
+          <div class="asm-controls" aria-label="Assembly view">
+            <button id="asm-csapp" type="button" class="active">CSAPP</button>
+            <button id="asm-raw" type="button">Raw</button>
+          </div>
+        </div>
+        <pre id="asm" class="asm-output"></pre>
+        <div id="console-resizer" class="layout-resizer layout-resizer-horizontal" role="separator" aria-label="Resize console panel" aria-orientation="horizontal" tabindex="0"></div>
+        <div class="panel-title">Console</div>
+        <pre id="console" class="console-output"></pre>
+      </section>
+    </div>
+    <footer id="meta" class="meta"></footer>
+    <div id="file-menu" class="context-menu" role="menu" hidden>
+      <button id="file-menu-rename" type="button" role="menuitem"><span>Rename</span><kbd>F2</kbd></button>
+      <button id="file-menu-delete" type="button" role="menuitem" class="danger"><span>Delete</span><kbd>Del</kbd></button>
+    </div>
+    <div id="modal-backdrop" class="modal-backdrop" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-message">
+        <div id="modal-title" class="modal-title"></div>
+        <div id="modal-message" class="modal-message"></div>
+        <input id="modal-input" class="modal-input" spellcheck="false" />
+        <div class="modal-actions">
+          <button id="modal-cancel" type="button">Cancel</button>
+          <button id="modal-confirm" type="button" class="primary">OK</button>
+        </div>
+      </section>
+    </div>
+  </div>
+`;
+
+const statusEl = must("#status");
+const metaEl = must("#meta");
+const workspaceEl = must<HTMLDivElement>("#workspace");
+const sidebarEl = must<HTMLElement>(".sidebar");
+const filesEl = must("#files");
+const tabsEl = must("#tabs");
+const asmPaneEl = must<HTMLElement>(".asm-pane");
+const editorHostEl = must<HTMLDivElement>("#editor");
+const asmEl = must("#asm");
+const consoleEl = must("#console");
+const compilerArgsEl = must<HTMLInputElement>("#compiler-args");
+const argsWindowsEl = must<HTMLButtonElement>("#args-windows");
+const argsCsappEl = must<HTMLButtonElement>("#args-csapp");
+const compileEl = must<HTMLButtonElement>("#compile");
+const runEl = must<HTMLButtonElement>("#run");
+const autoRunEl = must<HTMLInputElement>("#auto-run");
+const toggleFilesEl = must<HTMLButtonElement>("#toggle-files");
+const toggleAsmEl = must<HTMLButtonElement>("#toggle-asm");
+const toggleConsoleEl = must<HTMLButtonElement>("#toggle-console");
+const sidebarResizerEl = must<HTMLDivElement>("#sidebar-resizer");
+const asmResizerEl = must<HTMLDivElement>("#asm-resizer");
+const consoleResizerEl = must<HTMLDivElement>("#console-resizer");
+const asmCsappEl = must<HTMLButtonElement>("#asm-csapp");
+const asmRawEl = must<HTMLButtonElement>("#asm-raw");
+const fileMenuEl = must<HTMLDivElement>("#file-menu");
+const fileMenuRenameEl = must<HTMLButtonElement>("#file-menu-rename");
+const fileMenuDeleteEl = must<HTMLButtonElement>("#file-menu-delete");
+const modalBackdropEl = must<HTMLDivElement>("#modal-backdrop");
+const modalTitleEl = must<HTMLDivElement>("#modal-title");
+const modalMessageEl = must<HTMLDivElement>("#modal-message");
+const modalInputEl = must<HTMLInputElement>("#modal-input");
+const modalCancelEl = must<HTMLButtonElement>("#modal-cancel");
+const modalConfirmEl = must<HTMLButtonElement>("#modal-confirm");
+
+const codeFontScaleStorageKey = "mini-godbolt.codeFontScale";
+const legacyEditorFontScaleStorageKey = "mini-godbolt.editorFontScale";
+const legacyAsmFontScaleStorageKey = "mini-godbolt.asmFontScale";
+const legacyGlobalFontScaleStorageKey = "mini-godbolt.fontScale";
+const autoRunStorageKey = "mini-godbolt.autoRun";
+const sidebarWidthStorageKey = "mini-godbolt.layout.sidebarWidth";
+const asmWidthStorageKey = "mini-godbolt.layout.asmWidth";
+const consoleHeightStorageKey = "mini-godbolt.layout.consoleHeight";
+const legacyDiagnosticsHeightStorageKey = "mini-godbolt.layout.diagnosticsHeight";
+const legacyOutputHeightStorageKey = "mini-godbolt.layout.outputHeight";
+const filesVisibleStorageKey = "mini-godbolt.view.filesVisible";
+const asmVisibleStorageKey = "mini-godbolt.view.asmVisible";
+const consoleVisibleStorageKey = "mini-godbolt.view.consoleVisible";
+const openTabsStorageKey = "mini-godbolt.openTabsState";
+const minFontScale = 0.85;
+const maxFontScale = 1.55;
+const fontScaleStep = 0.08;
+const baseEditorFontSize = 16;
+const baseEditorLineHeight = 24;
+const baseAsmFontSize = 15;
+const baseAsmLineHeight = 24;
+const minSidebarWidth = 150;
+const minEditorWidth = 320;
+const minAsmWidth = 320;
+const minAssemblyTextHeight = 120;
+const minBottomPanelHeight = 70;
+const layoutResizerWidth = 1;
+const rightPaneChromeHeight = 69;
+let codeFontScale = readInitialCodeFontScale();
+let sidebarWidth = readStoredPixels(sidebarWidthStorageKey, minSidebarWidth);
+let asmWidth = readStoredPixels(asmWidthStorageKey, minAsmWidth);
+let consoleHeight = readInitialConsoleHeight();
+let filesVisible = readStoredBoolean(filesVisibleStorageKey, true);
+let asmVisible = readStoredBoolean(asmVisibleStorageKey, true);
+let consoleVisible = readStoredBoolean(consoleVisibleStorageKey, true);
+autoRunEl.checked = readStoredBoolean(autoRunStorageKey);
+
+const editor = monaco.editor.create(editorHostEl, {
+  automaticLayout: true,
+  fontFamily: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace",
+  fontSize: editorFontSize(),
+  fontLigatures: false,
+  lineHeight: editorLineHeight(),
+  minimap: { enabled: false },
+  mouseWheelZoom: false,
+  quickSuggestions: { comments: false, other: true, strings: true },
+  scrollbar: {
+    horizontalScrollbarSize: 8,
+    verticalScrollbarSize: 8,
+    useShadows: false
+  },
+  scrollBeyondLastLine: false,
+  suggestOnTriggerCharacters: true,
+  theme: "vs-dark",
+  language: "c"
+});
+
+let project: ProjectState = { activeFile: "main.c", files: [], compilerArgs: defaultCompilerArgs };
+let activeModel: monaco.editor.ITextModel | null = null;
+let openTabs: string[] = [];
+const models = new Map<string, monaco.editor.ITextModel>();
+const readOnlyFiles = new Map<string, ProjectFile>();
+const readOnlyByUri = new Map<string, string>();
+let compileTimer: number | undefined;
+let syncTimer: number | undefined;
+let latestCompileId = "";
+let latestRunId = "";
+let lsp: LspHandle | undefined;
+let projectRootUri = "";
+let contextMenuPath = "";
+let contextMenuInvoker: HTMLElement | null = null;
+let inlineRenamePath = "";
+let latestAsm = "";
+let latestDiagnostics = "";
+let latestRunOutput = "";
+let asmView: "csapp" | "raw" = "csapp";
+let activeModal: ModalState | null = null;
+let activeLayoutResize: LayoutResizeState | null = null;
+let editorLayoutFrame: number | undefined;
+
+type ModalState =
+  | { kind: "prompt"; resolve: (value: string | undefined) => void; restoreFocus: HTMLElement | null }
+  | { kind: "confirm"; resolve: (value: boolean) => void; restoreFocus: HTMLElement | null };
+
+type LayoutResizeKind = "sidebar" | "asm" | "console";
+
+type LayoutResizeState = {
+  kind: LayoutResizeKind;
+  handle: HTMLDivElement;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  startSize: number;
+};
+
+type StoredOpenTabsState = {
+  openTabs: string[];
+  activeFile: string;
+};
+
+applyViewVisibility();
+applyLayoutSizes();
+attachLayoutResizers();
+applyFontScales();
+void boot();
+
+async function boot(): Promise<void> {
+  try {
+    const [status, loaded] = await Promise.all([fetchStatus(), fetchProject()]);
+    project = loaded;
+    project.compilerArgs =
+      !project.compilerArgs ||
+      project.compilerArgs === legacyDefaultCompilerArgs ||
+      project.compilerArgs === linuxDefaultCompilerArgs ||
+      project.compilerArgs === malformedLinuxDefaultCompilerArgs ||
+      project.compilerArgs === windowsDefaultCompilerArgs
+        ? defaultCompilerArgs
+        : project.compilerArgs;
+    compilerArgsEl.value = project.compilerArgs;
+    updateArgsPresetButtons();
+    projectRootUri = pathToFileUri(status.projectDir);
+    renderMeta(status);
+    renderFiles();
+    restoreOpenTabs(project.activeFile || project.files[0]?.path || "main.c");
+    if (status.ready) {
+      lsp = attachLspClient({
+        monaco,
+        editor,
+        languageId: "c",
+        rootUri: projectRootUri,
+        getModels: () => [...models.values()],
+        onStatus: (message) => {
+          if (statusEl.textContent !== "Compiling" && statusEl.textContent !== "Running") statusEl.textContent = message;
+        }
+      });
+      statusEl.textContent = "Ready";
+    } else {
+      statusEl.textContent = "Toolchain missing";
+      setDiagnostics(status.toolchain);
+    }
+  } catch (err) {
+    statusEl.textContent = "Startup failed";
+    setDiagnostics(String(err));
+  }
+}
+
+compileEl.addEventListener("click", () => {
+  void runCompile();
+});
+
+runEl.addEventListener("click", () => {
+  void executeProgram();
+});
+
+autoRunEl.addEventListener("change", () => {
+  writeStoredBoolean(autoRunStorageKey, autoRunEl.checked);
+  if (autoRunEl.checked) void runCompile();
+});
+
+argsWindowsEl.addEventListener("click", () => {
+  setCompilerArgs(windowsDefaultCompilerArgs);
+});
+
+argsCsappEl.addEventListener("click", () => {
+  setCompilerArgs(linuxDefaultCompilerArgs);
+});
+
+toggleFilesEl.addEventListener("click", () => {
+  filesVisible = !filesVisible;
+  writeStoredBoolean(filesVisibleStorageKey, filesVisible);
+  applyViewVisibility();
+});
+
+toggleAsmEl.addEventListener("click", () => {
+  asmVisible = !asmVisible;
+  writeStoredBoolean(asmVisibleStorageKey, asmVisible);
+  applyViewVisibility();
+});
+
+toggleConsoleEl.addEventListener("click", () => {
+  consoleVisible = !consoleVisible;
+  writeStoredBoolean(consoleVisibleStorageKey, consoleVisible);
+  applyViewVisibility();
+});
+
+asmCsappEl.addEventListener("click", () => {
+  asmView = "csapp";
+  renderAssembly();
+});
+
+asmRawEl.addEventListener("click", () => {
+  asmView = "raw";
+  renderAssembly();
+});
+
+compilerArgsEl.addEventListener("input", () => {
+  project.compilerArgs = compilerArgsEl.value;
+  updateArgsPresetButtons();
+  scheduleSync();
+  scheduleCompile();
+});
+
+window.addEventListener("wheel", handleFontZoomWheel, { passive: false });
+
+must("#new-file").addEventListener("click", () => createFile());
+
+fileMenuRenameEl.addEventListener("click", () => {
+  const path = contextMenuPath;
+  hideFileMenu();
+  if (path) beginInlineRename(path);
+});
+
+fileMenuDeleteEl.addEventListener("click", () => {
+  const path = contextMenuPath;
+  const restoreFocus = contextMenuInvoker;
+  hideFileMenu();
+  if (path) void deleteFile(path, restoreFocus);
+});
+
+window.addEventListener("click", (event) => {
+  if (!fileMenuEl.hidden && !fileMenuEl.contains(event.target as Node)) hideFileMenu();
+});
+
+window.addEventListener("contextmenu", (event) => {
+  if (!fileMenuEl.hidden && !fileMenuEl.contains(event.target as Node) && !(event.target as Element).closest?.(".file-row")) {
+    hideFileMenu();
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (activeModal && !modalBackdropEl.contains(event.target as Node)) {
+    event.preventDefault();
+    focusModalDefault();
+    return;
+  }
+  if (event.key === "Escape") {
+    if (inlineRenamePath) {
+      event.preventDefault();
+      cancelInlineRename(true);
+      return;
+    }
+    hideFileMenu(true);
+    return;
+  }
+  const path = shortcutTargetPath(event.target);
+  if (!path) return;
+  if (event.key === "F2") {
+    event.preventDefault();
+    beginInlineRename(path);
+  }
+  if (event.key === "Delete") {
+    event.preventDefault();
+    void deleteFile(path);
+  }
+});
+
+filesEl.addEventListener("scroll", () => hideFileMenu());
+
+modalCancelEl.addEventListener("click", () => closeModal(false));
+modalConfirmEl.addEventListener("click", () => closeModal(true));
+modalBackdropEl.addEventListener("click", (event) => {
+  if (event.target === modalBackdropEl) closeModal(false);
+});
+modalBackdropEl.addEventListener("keydown", (event) => {
+  if (event.key === "Tab") {
+    trapModalFocus(event);
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModal(false);
+  }
+  if (
+    event.key === "Enter" &&
+    activeModal?.kind === "prompt" &&
+    !event.isComposing &&
+    event.target === modalInputEl
+  ) {
+    event.preventDefault();
+    closeModal(true);
+  }
+});
+
+window.addEventListener("focusin", (event) => {
+  if (activeModal && !modalBackdropEl.contains(event.target as Node)) {
+    focusModalDefault();
+  }
+});
+
+function openFile(path: string): void {
+  const file = project.files.find((item) => item.path === path) ?? readOnlyFiles.get(path);
+  if (!file) return;
+  const readOnly = readOnlyFiles.has(path);
+  ensureOpenTab(path);
+  if (!readOnly) project.activeFile = path;
+
+  let model = models.get(path);
+  if (!model) {
+    model = monaco.editor.createModel(file.content, "c", modelUriForPath(path));
+    model.onDidChangeContent(() => {
+      if (readOnlyFiles.has(path)) return;
+      const current = project.files.find((item) => item.path === path);
+      if (current) current.content = model?.getValue() ?? "";
+      scheduleSync();
+      if (path.endsWith(".c")) scheduleCompile();
+    });
+    models.set(path, model);
+  }
+
+  activeModel = model;
+  editor.setModel(model);
+  editor.updateOptions({ readOnly, readOnlyMessage: { value: "Third-party include sources are read-only." } });
+  renderFiles();
+  renderTabs();
+  persistOpenTabs();
+  if (!readOnly && path.endsWith(".c")) scheduleCompile();
+}
+
+function ensureOpenTab(path: string): void {
+  pruneOpenTabs();
+  if (!openTabs.some((item) => pathsEqual(item, path))) openTabs.push(path);
+}
+
+function closeTab(path: string): void {
+  pruneOpenTabs();
+  const index = openTabs.findIndex((item) => pathsEqual(item, path));
+  if (index < 0) return;
+
+  const model = models.get(path);
+  const wasActive = Boolean(model && activeModel === model);
+  openTabs.splice(index, 1);
+
+  if (wasActive) {
+    editor.setModel(null);
+    activeModel = null;
+  }
+  if (model) {
+    model.dispose();
+    models.delete(path);
+  }
+
+  if (wasActive) {
+    const nextPath = openTabs[index] ?? openTabs[index - 1];
+    if (nextPath) {
+      openFile(nextPath);
+      return;
+    }
+    editor.updateOptions({ readOnly: true, readOnlyMessage: { value: "Open a file from the explorer." } });
+  }
+
+  renderFiles();
+  renderTabs();
+  persistOpenTabs();
+}
+
+function pruneOpenTabs(): void {
+  openTabs = openTabs.filter((path) => sourcePathExists(path));
+}
+
+function replaceOpenTabPath(oldPath: string, nextPath: string): void {
+  openTabs = openTabs.map((path) => (pathsEqual(path, oldPath) ? nextPath : path));
+  persistOpenTabs();
+}
+
+function removeOpenTabPath(path: string): void {
+  openTabs = openTabs.filter((item) => !pathsEqual(item, path));
+  persistOpenTabs();
+}
+
+function sourcePathExists(path: string): boolean {
+  return project.files.some((file) => pathsEqual(file.path, path)) || readOnlyFiles.has(path);
+}
+
+function restoreOpenTabs(fallbackPath: string): void {
+  const stored = readStoredOpenTabs();
+  if (!stored) {
+    openFile(fallbackPath);
+    return;
+  }
+
+  openTabs = uniqueExistingPaths(stored.openTabs);
+  const activePath = sourcePathExists(stored.activeFile)
+    ? stored.activeFile
+    : openTabs.find((path) => sourcePathExists(path)) ?? "";
+
+  if (!activePath) {
+    editor.updateOptions({ readOnly: true, readOnlyMessage: { value: "Open a file from the explorer." } });
+    renderFiles();
+    renderTabs();
+    persistOpenTabs();
+    return;
+  }
+
+  if (!openTabs.some((path) => pathsEqual(path, activePath))) openTabs.push(activePath);
+  openFile(activePath);
+}
+
+function persistOpenTabs(): void {
+  pruneOpenTabs();
+  writeStoredOpenTabs({
+    openTabs: openTabs.filter((path) => sourcePathExists(path)),
+    activeFile: activeEditorPath()
+  });
+}
+
+function uniqueExistingPaths(paths: string[]): string[] {
+  const result: string[] = [];
+  for (const path of paths) {
+    if (!sourcePathExists(path)) continue;
+    if (result.some((item) => pathsEqual(item, path))) continue;
+    result.push(path);
+  }
+  return result;
+}
+
+function activeEditorPath(): string {
+  if (!activeModel) return "";
+  const activeUri = activeModel.uri.toString();
+  for (const file of project.files) {
+    if (modelUriForPath(file.path).toString() === activeUri) return file.path;
+  }
+  for (const file of readOnlyFiles.values()) {
+    if (modelUriForPath(file.path).toString() === activeUri) return file.path;
+  }
+  return "";
+}
+
+function renderFiles(): void {
+  hideFileMenu();
+  if (inlineRenamePath && !project.files.some((file) => file.path === inlineRenamePath)) {
+    inlineRenamePath = "";
+  }
+  filesEl.innerHTML = "";
+  const activePath = activeEditorPath();
+  for (const file of sortedFiles()) {
+    const row = document.createElement("div");
+    row.className = pathsEqual(file.path, activePath) ? "file-row active" : "file-row";
+
+    if (file.path === inlineRenamePath) {
+      row.classList.add("renaming");
+      const renameInput = document.createElement("input");
+      renameInput.type = "text";
+      renameInput.className = "file-rename-input";
+      renameInput.value = file.path;
+      renameInput.title = file.path;
+      renameInput.dataset.path = file.path;
+      renameInput.spellcheck = false;
+      renameInput.setAttribute("aria-label", `Rename ${file.path}`);
+
+      let closing = false;
+      const cancel = () => {
+        closing = true;
+        cancelInlineRename(true);
+      };
+      const commit = async () => {
+        if (closing) return;
+        closing = true;
+        const renamed = await renameFile(file.path, renameInput.value);
+        if (!renamed) {
+          closing = false;
+          renameInput.focus();
+          renameInput.select();
+        }
+      };
+
+      renameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.isComposing) {
+          event.preventDefault();
+          event.stopPropagation();
+          void commit();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          cancel();
+        }
+      });
+      renameInput.addEventListener("blur", () => {
+        if (!closing) void commit();
+      });
+
+      row.append(renameInput);
+      filesEl.append(row);
+      window.requestAnimationFrame(() => {
+        renameInput.focus();
+        renameInput.select();
+      });
+      continue;
+    }
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "file";
+    openButton.title = file.path;
+    openButton.dataset.path = file.path;
+    openButton.setAttribute("aria-haspopup", "menu");
+
+    const icon = document.createElement("span");
+    icon.className = file.path.endsWith(".h") ? "file-icon header" : "file-icon source";
+    icon.textContent = file.path.endsWith(".h") ? "H" : "C";
+    const label = document.createElement("span");
+    label.className = "file-name";
+    label.textContent = file.path;
+    openButton.append(icon, label);
+
+    openButton.addEventListener("click", () => openFile(file.path));
+    openButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openFile(file.path);
+      showFileMenu(file.path, event.clientX, event.clientY, fileButtonForPath(file.path) ?? openButton);
+    });
+    openButton.addEventListener("keydown", (event) => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      openFile(file.path);
+      const invoker = fileButtonForPath(file.path) ?? openButton;
+      const rect = invoker.getBoundingClientRect();
+      showFileMenu(file.path, rect.left + 8, rect.bottom + 4, invoker);
+    });
+
+    row.append(openButton);
+    filesEl.append(row);
+  }
+}
+
+function beginInlineRename(path: string): void {
+  if (!project.files.some((file) => file.path === path)) return;
+  hideFileMenu();
+  inlineRenamePath = path;
+  renderFiles();
+}
+
+function cancelInlineRename(restoreFocus = false): void {
+  const path = inlineRenamePath;
+  inlineRenamePath = "";
+  renderFiles();
+  if (restoreFocus && path) fileButtonForPath(path)?.focus();
+}
+
+function fileButtonForPath(path: string): HTMLButtonElement | null {
+  for (const button of filesEl.querySelectorAll<HTMLButtonElement>(".file")) {
+    if (button.dataset.path === path) return button;
+  }
+  return null;
+}
+
+function showFileMenu(path: string, x: number, y: number, invoker: HTMLElement): void {
+  contextMenuPath = path;
+  contextMenuInvoker = invoker;
+  fileMenuEl.hidden = false;
+
+  const width = fileMenuEl.offsetWidth;
+  const height = fileMenuEl.offsetHeight;
+  const left = Math.min(x, window.innerWidth - width - 8);
+  const top = Math.min(y, window.innerHeight - height - 8);
+  fileMenuEl.style.left = `${Math.max(8, left)}px`;
+  fileMenuEl.style.top = `${Math.max(8, top)}px`;
+  fileMenuRenameEl.focus();
+}
+
+function hideFileMenu(restoreFocus = false): void {
+  if (fileMenuEl.hidden) return;
+  const invoker = contextMenuInvoker;
+  fileMenuEl.hidden = true;
+  contextMenuPath = "";
+  contextMenuInvoker = null;
+  if (restoreFocus) invoker?.focus();
+}
+
+function showConfirm(
+  title: string,
+  message: string,
+  confirmText: string,
+  danger = false,
+  restoreFocus = focusedElement()
+): Promise<boolean> {
+  closeModal(false);
+  return new Promise((resolve) => {
+    activeModal = { kind: "confirm", resolve, restoreFocus };
+    openModal(title, message, confirmText, danger, false);
+    danger ? modalCancelEl.focus() : modalConfirmEl.focus();
+  });
+}
+
+function openModal(title: string, message: string, confirmText: string, danger: boolean, showInput: boolean): void {
+  hideFileMenu();
+  modalTitleEl.textContent = title;
+  modalMessageEl.textContent = message;
+  modalMessageEl.hidden = !message;
+  modalInputEl.setAttribute("aria-label", title);
+  modalInputEl.hidden = !showInput;
+  modalConfirmEl.textContent = confirmText;
+  modalConfirmEl.classList.toggle("danger", danger);
+  modalBackdropEl.hidden = false;
+}
+
+function closeModal(confirmed: boolean): void {
+  if (!activeModal) return;
+
+  const modal = activeModal;
+  const value = modalInputEl.value;
+  activeModal = null;
+  modalBackdropEl.hidden = true;
+  modalInputEl.value = "";
+  modalConfirmEl.classList.remove("danger");
+  modal.restoreFocus?.focus();
+
+  if (modal.kind === "prompt") {
+    modal.resolve(confirmed ? value : undefined);
+  } else {
+    modal.resolve(confirmed);
+  }
+}
+
+function focusedElement(): HTMLElement | null {
+  return document.activeElement instanceof HTMLElement ? document.activeElement : null;
+}
+
+function focusableModalControls(): HTMLElement[] {
+  return [modalInputEl, modalCancelEl, modalConfirmEl].filter((el) => !el.hidden);
+}
+
+function focusModalDefault(): void {
+  if (!activeModal) return;
+  if (activeModal.kind === "prompt") {
+    modalInputEl.focus();
+  } else {
+    modalCancelEl.focus();
+  }
+}
+
+function trapModalFocus(event: KeyboardEvent): void {
+  const controls = focusableModalControls();
+  if (!controls.length) return;
+
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey) {
+    if (active === first || !modalBackdropEl.contains(active)) {
+      event.preventDefault();
+      last.focus();
+    }
+    return;
+  }
+  if (active === last || !modalBackdropEl.contains(active)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function renderTabs(): void {
+  pruneOpenTabs();
+  tabsEl.innerHTML = "";
+  const activePath = activeEditorPath();
+  for (const path of openTabs) {
+    const tab = document.createElement("div");
+    tab.className = pathsEqual(path, activePath) ? "tab active" : "tab";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(pathsEqual(path, activePath)));
+    tab.title = path;
+    tab.addEventListener("auxclick", (event) => {
+      if (event.button === 1) {
+        event.preventDefault();
+        closeTab(path);
+      }
+    });
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "tab-label";
+    selectButton.setAttribute("aria-label", `Open ${path}`);
+    selectButton.addEventListener("click", () => openFile(path));
+
+    const icon = document.createElement("span");
+    icon.className = path.endsWith(".h") ? "tab-icon header" : "tab-icon source";
+    icon.textContent = path.endsWith(".h") ? "H" : "C";
+    const label = document.createElement("span");
+    label.className = "tab-name";
+    label.textContent = path;
+    selectButton.append(icon, label);
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "tab-close";
+    closeButton.textContent = "x";
+    closeButton.title = `Close ${path}`;
+    closeButton.setAttribute("aria-label", `Close ${path}`);
+    closeButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTab(path);
+    });
+
+    tab.append(selectButton, closeButton);
+    tabsEl.append(tab);
+  }
+}
+
+function sortedFiles(): ProjectFile[] {
+  return [...project.files].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function createFile(): void {
+  const base = "new-file";
+  let index = 0;
+  let path = `${base}.c`;
+  while (project.files.some((file) => pathsEqual(file.path, path))) {
+    index += 1;
+    path = `${base}${index}.c`;
+  }
+  project.files.push({ path, content: "" });
+  inlineRenamePath = path;
+  openFile(path);
+  scheduleSync();
+}
+
+async function renameFile(oldPath: string, nextPathInput: string): Promise<boolean> {
+  const file = project.files.find((item) => item.path === oldPath);
+  if (!file) return false;
+
+  const nextPath = normalizeProjectPath(nextPathInput);
+  if (!nextPath || nextPath === oldPath) {
+    inlineRenamePath = "";
+    renderFiles();
+    fileButtonForPath(oldPath)?.focus();
+    return true;
+  }
+  const validationError = validateEditableSourcePath(nextPath);
+  if (validationError) {
+    setDiagnostics(validationError);
+    return false;
+  }
+  if (project.files.some((item) => item.path !== oldPath && pathsEqual(item.path, nextPath))) {
+    setDiagnostics(`${nextPath} already exists`);
+    return false;
+  }
+
+  const nextProject = cloneProject(project);
+  const nextFile = nextProject.files.find((item) => item.path === oldPath);
+  if (!nextFile) return false;
+  const oldModel = models.get(oldPath);
+  nextFile.content = oldModel?.getValue() ?? file.content;
+  nextFile.path = nextPath;
+  if (nextProject.activeFile === oldPath) nextProject.activeFile = nextPath;
+
+  try {
+    statusEl.textContent = "Saving";
+    project = await syncProject(nextProject);
+  } catch (err) {
+    statusEl.textContent = "Save failed";
+    setDiagnostics(String(err));
+    return false;
+  }
+
+  inlineRenamePath = "";
+  replaceOpenTabPath(oldPath, nextPath);
+  if (oldModel) {
+    if (activeModel === oldModel) editor.setModel(null);
+    oldModel.dispose();
+    models.delete(oldPath);
+  }
+  setDiagnostics("");
+  renderFiles();
+  renderTabs();
+  openFile(nextPath);
+  fileButtonForPath(nextPath)?.focus();
+  statusEl.textContent = "Saved";
+  return true;
+}
+
+async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Promise<void> {
+  if (project.files.length <= 1) {
+    setDiagnostics("Keep at least one project file.");
+    return;
+  }
+  const confirmed = await showConfirm("Delete file", `Delete ${path}?`, "Delete", true, restoreFocus ?? focusedElement());
+  if (!confirmed) return;
+
+  const index = project.files.findIndex((file) => file.path === path);
+  if (index < 0) return;
+  const nextProject = cloneProject(project);
+  nextProject.files.splice(index, 1);
+  if (nextProject.activeFile === path) {
+    const next = nextProject.files.find((file) => file.path.endsWith(".c")) ?? nextProject.files[0];
+    nextProject.activeFile = next.path;
+  }
+
+  const model = models.get(path);
+  try {
+    statusEl.textContent = "Saving";
+    project = await syncProject(nextProject);
+  } catch (err) {
+    statusEl.textContent = "Save failed";
+    setDiagnostics(String(err));
+    return;
+  }
+
+  if (model) {
+    if (activeModel === model) editor.setModel(null);
+    model.dispose();
+    models.delete(path);
+  }
+  removeOpenTabPath(path);
+
+  if (activeModel === model || path === project.activeFile) {
+    const next = project.files.find((file) => file.path === project.activeFile) ?? project.files[0];
+    activeModel = null;
+    openFile(next.path);
+  }
+
+  setDiagnostics("");
+  renderFiles();
+  renderTabs();
+  statusEl.textContent = "Saved";
+  scheduleCompile();
+}
+
+function scheduleSync(): void {
+  window.clearTimeout(syncTimer);
+  syncTimer = window.setTimeout(() => {
+    void syncProject(cloneProject(project)).catch((err) => {
+      setDiagnostics(String(err));
+    });
+  }, 250);
+}
+
+function scheduleCompile(): void {
+  window.clearTimeout(compileTimer);
+  compileTimer = window.setTimeout(() => {
+    void runCompile();
+  }, 600);
+}
+
+async function runCompile(): Promise<void> {
+  if (!project.activeFile.endsWith(".c")) {
+    statusEl.textContent = "Open a .c file to compile";
+    return;
+  }
+  const requestId = crypto.randomUUID();
+  latestCompileId = requestId;
+
+  const snapshot = projectSnapshotForToolRun();
+  try {
+    await syncProject(snapshot);
+  } catch (err) {
+    if (requestId !== latestCompileId) return;
+    renderCompile({
+      ok: false,
+      asm: "",
+      stderr: "",
+      exitCode: -1,
+      durationMs: 0,
+      requestId,
+      error: `Save failed: ${String(err)}`
+    });
+    return;
+  }
+  if (requestId !== latestCompileId) return;
+
+  statusEl.textContent = "Compiling";
+  const result = await compile(snapshot.activeFile, snapshot.compilerArgs, requestId).catch((err) => ({
+    ok: false,
+    asm: "",
+    stderr: "",
+    exitCode: -1,
+    durationMs: 0,
+    requestId,
+    error: String(err)
+  }));
+  if (result.requestId !== latestCompileId) return;
+  renderCompile(result);
+  if (result.ok && autoRunEl.checked) {
+    void executeProgram(snapshot, true);
+  }
+}
+
+async function executeProgram(snapshot = projectSnapshotForToolRun(), alreadySynced = false): Promise<void> {
+  if (!snapshot.activeFile.endsWith(".c")) {
+    statusEl.textContent = "Open a .c file to run";
+    return;
+  }
+  const requestId = crypto.randomUUID();
+  latestRunId = requestId;
+
+  if (!alreadySynced) {
+    try {
+      await syncProject(snapshot);
+    } catch (err) {
+      if (requestId !== latestRunId) return;
+      renderRun({
+        ok: false,
+        stdout: "",
+        stderr: "",
+        exitCode: -1,
+        durationMs: 0,
+        requestId,
+        error: `Save failed: ${String(err)}`
+      });
+      return;
+    }
+  }
+  if (requestId !== latestRunId) return;
+
+  statusEl.textContent = "Running";
+  setRunOutput("Running...");
+  const result = await runProgramApi(snapshot.activeFile, snapshot.compilerArgs, requestId).catch((err) => ({
+    ok: false,
+    stdout: "",
+    stderr: "",
+    exitCode: -1,
+    durationMs: 0,
+    requestId,
+    error: String(err)
+  }));
+  if (result.requestId !== latestRunId) return;
+  renderRun(result);
+}
+
+function projectSnapshotForToolRun(): ProjectState {
+  if (activeModel) {
+    const current = project.files.find((item) => item.path === project.activeFile);
+    if (current) current.content = activeModel.getValue();
+  }
+  project.compilerArgs = compilerArgsEl.value.trim() || defaultCompilerArgs;
+  return cloneProject(project);
+}
+
+function renderCompile(result: CompileResponse): void {
+  latestAsm = result.asm || "";
+  renderAssembly();
+  setDiagnostics([result.error, result.stderr].filter(Boolean).join("\n\n"));
+  statusEl.textContent = result.ok ? `Compiled in ${result.durationMs}ms` : `Compile failed (${result.exitCode})`;
+}
+
+function renderRun(result: RunResponse): void {
+  setRunOutput(formatRunOutput(result));
+  statusEl.textContent = result.ok
+    ? `Exited with code ${result.exitCode} in ${result.durationMs}ms`
+    : `Run failed (${result.exitCode})`;
+}
+
+function setCompilerArgs(value: string): void {
+  compilerArgsEl.value = value;
+  project.compilerArgs = value;
+  updateArgsPresetButtons();
+  scheduleSync();
+  scheduleCompile();
+}
+
+function updateArgsPresetButtons(): void {
+  const value = compilerArgsEl.value.trim();
+  argsWindowsEl.classList.toggle("active", value === windowsDefaultCompilerArgs);
+  argsCsappEl.classList.toggle("active", value === linuxDefaultCompilerArgs);
+}
+
+function formatRunOutput(result: RunResponse): string {
+  const sections = [result.note, result.error, result.stdout].filter(Boolean) as string[];
+  if (result.stderr) {
+    sections.push(result.stdout ? `stderr:\n${result.stderr}` : result.stderr);
+  }
+  sections.push(`[exit code: ${result.exitCode}]`);
+  return sections.join("\n\n");
+}
+
+function setDiagnostics(text: string): void {
+  latestDiagnostics = text;
+  renderConsole();
+}
+
+function setRunOutput(text: string): void {
+  latestRunOutput = text;
+  renderConsole();
+}
+
+function renderConsole(): void {
+  const sections: string[] = [];
+  if (latestDiagnostics.trim()) sections.push(`Diagnostics\n${latestDiagnostics}`);
+  if (latestRunOutput.trim()) sections.push(`Output\n${latestRunOutput}`);
+  consoleEl.textContent = sections.join("\n\n");
+}
+
+function renderAssembly(): void {
+  asmCsappEl.classList.toggle("active", asmView === "csapp");
+  asmRawEl.classList.toggle("active", asmView === "raw");
+  const text = asmView === "csapp" ? simplifyAssembly(latestAsm) : latestAsm;
+  asmEl.innerHTML = highlightAssembly(text);
+}
+
+function handleFontZoomWheel(event: WheelEvent): void {
+  if (!event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+
+  if (!isCodeFontZoomTarget(event.target)) return;
+
+  event.stopPropagation();
+  const direction = event.deltaY < 0 ? 1 : -1;
+  setCodeFontScale(codeFontScale + direction * fontScaleStep);
+}
+
+function attachLayoutResizers(): void {
+  sidebarResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("sidebar", event));
+  asmResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("asm", event));
+  consoleResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("console", event));
+  sidebarResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
+  asmResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
+  consoleResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
+  window.addEventListener("pointermove", handleLayoutResizeMove);
+  window.addEventListener("pointerup", finishLayoutResize);
+  window.addEventListener("pointercancel", finishLayoutResize);
+  window.addEventListener("blur", finishLayoutResize);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) finishLayoutResize();
+  });
+  window.addEventListener("resize", () => {
+    clampLayoutSizesToViewport();
+    applyLayoutSizes();
+    queueEditorLayout();
+  });
+}
+
+function applyViewVisibility(): void {
+  workspaceEl.classList.toggle("files-hidden", !filesVisible);
+  workspaceEl.classList.toggle("asm-hidden", !asmVisible);
+  asmPaneEl.classList.toggle("console-hidden", !consoleVisible);
+
+  toggleFilesEl.classList.toggle("active", filesVisible);
+  toggleAsmEl.classList.toggle("active", asmVisible);
+  toggleConsoleEl.classList.toggle("active", consoleVisible);
+  toggleFilesEl.setAttribute("aria-pressed", String(filesVisible));
+  toggleAsmEl.setAttribute("aria-pressed", String(asmVisible));
+  toggleConsoleEl.setAttribute("aria-pressed", String(consoleVisible));
+
+  clampLayoutSizesToViewport();
+  applyLayoutSizes();
+  queueSettledEditorLayout();
+}
+
+function startLayoutResize(kind: LayoutResizeKind, event: PointerEvent): void {
+  if (window.matchMedia("(max-width: 980px)").matches) return;
+
+  const handle = event.currentTarget as HTMLDivElement;
+  event.preventDefault();
+  hideFileMenu();
+  activeLayoutResize = {
+    kind,
+    handle,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    startSize: currentLayoutSize(kind)
+  };
+  handle.classList.add("active");
+  document.body.classList.add(
+    "resizing-layout",
+    kind === "sidebar" || kind === "asm" ? "resizing-layout-col" : "resizing-layout-row"
+  );
+  handle.setPointerCapture(event.pointerId);
+}
+
+function handleLayoutResizeMove(event: PointerEvent): void {
+  if (!activeLayoutResize) return;
+
+  event.preventDefault();
+  const dx = event.clientX - activeLayoutResize.startX;
+  const dy = event.clientY - activeLayoutResize.startY;
+
+  switch (activeLayoutResize.kind) {
+    case "sidebar":
+      sidebarWidth = clampPixels(activeLayoutResize.startSize + dx, minSidebarWidth, maxSidebarWidth());
+      break;
+    case "asm":
+      asmWidth = clampPixels(activeLayoutResize.startSize - dx, minAsmWidth, maxAsmWidth());
+      break;
+    case "console":
+      consoleHeight = clampPixels(activeLayoutResize.startSize - dy, minBottomPanelHeight, maxConsoleHeight());
+      break;
+  }
+
+  applyLayoutSizes();
+  queueEditorLayout();
+}
+
+function finishLayoutResize(): void {
+  const resize = activeLayoutResize;
+  if (!resize) return;
+  activeLayoutResize = null;
+
+  resize.handle.classList.remove("active");
+  try {
+    resize.handle.releasePointerCapture(resize.pointerId);
+  } catch {
+    // The browser can release capture before pointerup when a drag leaves the window.
+  }
+  persistLayoutSize(resize.kind);
+  document.body.classList.remove("resizing-layout", "resizing-layout-col", "resizing-layout-row");
+  queueSettledEditorLayout();
+}
+
+function applyLayoutSizes(): void {
+  setOptionalPixelCssVar("--sidebar-width", sidebarWidth);
+  setOptionalPixelCssVar("--asm-width", asmWidth);
+  setOptionalPixelCssVar("--console-height", consoleHeight);
+}
+
+function clampLayoutSizesToViewport(): void {
+  if (sidebarWidth !== undefined) sidebarWidth = clampPixels(sidebarWidth, minSidebarWidth, maxSidebarWidth());
+  if (asmWidth !== undefined) asmWidth = clampPixels(asmWidth, minAsmWidth, maxAsmWidth());
+  if (consoleHeight !== undefined) consoleHeight = clampPixels(consoleHeight, minBottomPanelHeight, maxConsoleHeight());
+}
+
+function persistLayoutSize(kind: LayoutResizeKind): void {
+  switch (kind) {
+    case "sidebar":
+      if (sidebarWidth !== undefined) writeStoredPixels(sidebarWidthStorageKey, sidebarWidth);
+      break;
+    case "asm":
+      if (asmWidth !== undefined) writeStoredPixels(asmWidthStorageKey, asmWidth);
+      break;
+    case "console":
+      if (consoleHeight !== undefined) writeStoredPixels(consoleHeightStorageKey, consoleHeight);
+      break;
+  }
+}
+
+function currentLayoutSize(kind: LayoutResizeKind): number {
+  switch (kind) {
+    case "sidebar":
+      return measuredWidth(sidebarEl, 220);
+    case "asm":
+      return measuredWidth(asmPaneEl, Math.round(window.innerWidth * 0.46));
+    case "console":
+      return measuredHeight(consoleEl, Math.round(window.innerHeight * 0.24));
+  }
+}
+
+function maxSidebarWidth(): number {
+  const workspaceWidth = workspaceEl.clientWidth || window.innerWidth;
+  const reservedAsmWidth = asmVisible ? currentAsmWidth() : 0;
+  const visibleResizerWidth = layoutResizerWidth + (asmVisible ? layoutResizerWidth : 0);
+  return Math.max(minSidebarWidth, workspaceWidth - reservedAsmWidth - minEditorWidth - visibleResizerWidth);
+}
+
+function maxAsmWidth(): number {
+  const workspaceWidth = workspaceEl.clientWidth || window.innerWidth;
+  const reservedSidebarWidth = filesVisible ? currentSidebarWidth() : 0;
+  const visibleResizerWidth = layoutResizerWidth + (filesVisible ? layoutResizerWidth : 0);
+  return Math.max(minAsmWidth, workspaceWidth - reservedSidebarWidth - minEditorWidth - visibleResizerWidth);
+}
+
+function maxConsoleHeight(): number {
+  const paneHeight = asmPaneEl.clientHeight || window.innerHeight;
+  return Math.max(minBottomPanelHeight, paneHeight - rightPaneChromeHeight - minAssemblyTextHeight);
+}
+
+function currentSidebarWidth(): number {
+  return sidebarWidth ?? measuredWidth(sidebarEl, 220);
+}
+
+function currentAsmWidth(): number {
+  return asmWidth ?? measuredWidth(asmPaneEl, Math.round(window.innerWidth * 0.46));
+}
+
+function measuredWidth(element: Element, fallback: number): number {
+  const width = element.getBoundingClientRect().width;
+  return Number.isFinite(width) && width > 0 ? width : fallback;
+}
+
+function measuredHeight(element: Element, fallback: number): number {
+  const height = element.getBoundingClientRect().height;
+  return Number.isFinite(height) && height > 0 ? height : fallback;
+}
+
+function setOptionalPixelCssVar(name: string, value: number | undefined): void {
+  if (value === undefined) {
+    document.documentElement.style.removeProperty(name);
+    return;
+  }
+  document.documentElement.style.setProperty(name, `${value}px`);
+}
+
+function queueEditorLayout(): void {
+  if (editorLayoutFrame !== undefined) return;
+  editorLayoutFrame = window.requestAnimationFrame(() => {
+    editorLayoutFrame = undefined;
+    layoutEditorToHost();
+  });
+}
+
+function queueSettledEditorLayout(): void {
+  queueEditorLayout();
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(layoutEditorToHost);
+  });
+}
+
+function layoutEditorToHost(): void {
+  const rect = editorHostEl.getBoundingClientRect();
+  const width = Math.floor(rect.width);
+  const height = Math.floor(rect.height);
+  if (width > 0 && height > 0) {
+    editor.layout({ width, height });
+    return;
+  }
+  editor.layout();
+}
+
+function isCodeFontZoomTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest(".editor") || target.closest(".asm-output"));
+}
+
+function setCodeFontScale(nextScale: number): void {
+  codeFontScale = clampFontScale(nextScale);
+  try {
+    localStorage.setItem(codeFontScaleStorageKey, String(codeFontScale));
+    localStorage.setItem(legacyEditorFontScaleStorageKey, String(codeFontScale));
+    localStorage.setItem(legacyAsmFontScaleStorageKey, String(codeFontScale));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+  applyFontScales();
+}
+
+function applyFontScales(): void {
+  document.documentElement.style.setProperty("--asm-font-size", `${Math.round(baseAsmFontSize * codeFontScale)}px`);
+  document.documentElement.style.setProperty("--asm-line-height", `${Math.round(baseAsmLineHeight * codeFontScale)}px`);
+  editor.updateOptions({
+    fontSize: editorFontSize(),
+    lineHeight: editorLineHeight()
+  });
+  queueEditorLayout();
+}
+
+function readInitialCodeFontScale(): number {
+  const current = readStoredFontScale(codeFontScaleStorageKey);
+  if (current !== undefined) return current;
+
+  const legacyScales = [
+    readStoredFontScale(legacyEditorFontScaleStorageKey),
+    readStoredFontScale(legacyAsmFontScaleStorageKey),
+    readStoredFontScale(legacyGlobalFontScaleStorageKey)
+  ].filter((value): value is number => value !== undefined);
+  if (legacyScales.length > 0) return Math.max(...legacyScales);
+  return 1;
+}
+
+function readInitialConsoleHeight(): number | undefined {
+  const current = readStoredPixels(consoleHeightStorageKey, minBottomPanelHeight);
+  if (current !== undefined) return current;
+
+  const legacyHeights = [
+    readStoredPixels(legacyDiagnosticsHeightStorageKey, minBottomPanelHeight),
+    readStoredPixels(legacyOutputHeightStorageKey, minBottomPanelHeight)
+  ].filter((value): value is number => value !== undefined);
+  if (legacyHeights.length > 0) return Math.max(...legacyHeights);
+  return undefined;
+}
+
+function readStoredFontScale(storageKey: string): number | undefined {
+  try {
+    const stored = Number(localStorage.getItem(storageKey));
+    if (Number.isFinite(stored)) return clampFontScale(stored);
+  } catch {
+    // Keep the default when persisted preferences cannot be read.
+  }
+  return undefined;
+}
+
+function readStoredPixels(storageKey: string, min: number): number | undefined {
+  try {
+    const stored = Number(localStorage.getItem(storageKey));
+    if (Number.isFinite(stored)) return Math.max(min, Math.round(stored));
+  } catch {
+    // Keep CSS defaults when persisted layout preferences cannot be read.
+  }
+  return undefined;
+}
+
+function writeStoredPixels(storageKey: string, value: number): void {
+  try {
+    localStorage.setItem(storageKey, String(value));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function readStoredBoolean(storageKey: string, fallback = false): boolean {
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+  } catch {
+    // Keep the caller's default when persisted preferences cannot be read.
+  }
+  return fallback;
+}
+
+function writeStoredBoolean(storageKey: string, value: boolean): void {
+  try {
+    localStorage.setItem(storageKey, String(value));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function readStoredOpenTabs(): StoredOpenTabsState | undefined {
+  try {
+    const raw = localStorage.getItem(openTabsStorageKey);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return { openTabs: parsed.filter(isString), activeFile: "" };
+    }
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const state = parsed as Partial<StoredOpenTabsState>;
+    return {
+      openTabs: Array.isArray(state.openTabs) ? state.openTabs.filter(isString) : [],
+      activeFile: typeof state.activeFile === "string" ? state.activeFile : ""
+    };
+  } catch {
+    // Ignore malformed or inaccessible storage and use the project default.
+  }
+  return undefined;
+}
+
+function writeStoredOpenTabs(state: StoredOpenTabsState): void {
+  try {
+    localStorage.setItem(openTabsStorageKey, JSON.stringify(state));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function editorFontSize(): number {
+  return Math.round(baseEditorFontSize * codeFontScale);
+}
+
+function editorLineHeight(): number {
+  return Math.round(baseEditorLineHeight * codeFontScale);
+}
+
+function clampFontScale(value: number): number {
+  return Math.min(maxFontScale, Math.max(minFontScale, value));
+}
+
+function clampPixels(value: number, min: number, max: number): number {
+  return Math.round(Math.min(Math.max(min, max), Math.max(min, value)));
+}
+
+function simplifyAssembly(asm: string): string {
+  const out: string[] = [];
+  let previousBlank = false;
+  let skippingSection = false;
+
+  for (const rawLine of asm.replaceAll("\r\n", "\n").split("\n")) {
+    const trimmed = rawLine.trim();
+
+    if (!trimmed) {
+      if (!previousBlank && out.length > 0) out.push("");
+      previousBlank = true;
+      continue;
+    }
+
+    if (trimmed.startsWith(".section")) {
+      skippingSection = !trimmed.includes(".text");
+      continue;
+    }
+    if (trimmed === ".text") {
+      skippingSection = false;
+      continue;
+    }
+    if (skippingSection) continue;
+    if (isNoisyAsmLine(trimmed)) continue;
+
+    const line = normalizeAsmLine(rawLine);
+    if (!line) continue;
+    out.push(line);
+    previousBlank = false;
+  }
+
+  return out.join("\n").trimEnd();
+}
+
+function isNoisyAsmLine(trimmed: string): boolean {
+  if (/^@feat\.00\b/.test(trimmed)) return true;
+  if (/^\.(Ltmp|Lfunc_end|Linfo_string|Lstr|Lsec_end|Ldebug|Lline|Lcu)/.test(trimmed)) return true;
+  if (/^\s*#\s*(kill|fake_use):/.test(trimmed)) return true;
+  if (/^#\s*(?:--\s*(?:Begin|End) function|%bb\.)/.test(trimmed)) return true;
+  return /^(?:\.(?:def|scl|type|size|endef|file|globl|global|p2align|align|addrsig|ident|seh_|cfi_|cv_|loc|long|short|byte|quad|set)\b)/.test(
+    trimmed
+  );
+}
+
+function normalizeAsmLine(line: string): string {
+  const trimmed = line.trim();
+  const label = /^([.$A-Za-z_][\w.$@]*:)(?:\s*(.*))?$/.exec(trimmed);
+  if (label) {
+    const name = label[1];
+    if (/^\.(?:Ltmp|Lfunc_end|Ldebug)/.test(name)) return "";
+    return label[2] ? `${name.padEnd(24)} ${label[2].trim()}` : name;
+  }
+  if (trimmed.startsWith("#")) return trimmed;
+  return `    ${trimmed.replace(/\s+/g, " ")}`;
+}
+
+function highlightAssembly(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const commentIndex = line.indexOf("#");
+      const code = commentIndex >= 0 ? line.slice(0, commentIndex) : line;
+      const comment = commentIndex >= 0 ? line.slice(commentIndex) : "";
+      return `${highlightAsmCode(code)}${comment ? `<span class="asm-comment">${escapeHtml(comment)}</span>` : ""}`;
+    })
+    .join("\n");
+}
+
+function highlightAsmCode(code: string): string {
+  let escaped = escapeHtml(code);
+  escaped = escaped.replace(/^(\s*[.$A-Za-z_][\w.$@]*:)/, '<span class="asm-label">$1</span>');
+  escaped = escaped.replace(/^(\s*)([a-z][a-z0-9.]*)(\b)/, '$1<span class="asm-op">$2</span>$3');
+  escaped = escaped.replace(
+    /(%?)(\b(?:r(?:ax|bx|cx|dx|si|di|bp|sp|ip|[8-9]|1[0-5])(?:[bwd])?|e(?:ax|bx|cx|dx|si|di|bp|sp)|[abcd][lh]|[er]?(?:flags)|xmm\d+|ymm\d+|zmm\d+)\b)/gi,
+    '<span class="asm-reg">$1$2</span>'
+  );
+  escaped = escaped.replace(/(\$?-?\b(?:0x[0-9a-f]+|\d+)\b)/gi, '<span class="asm-imm">$1</span>');
+  return escaped;
+}
+
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function renderMeta(status: StatusResponse): void {
+  metaEl.textContent = `Project: ${status.projectDir} | Include: ${status.includeDir} | System: ${status.systemIncludeDir}`;
+}
+
+editor.onMouseDown((event) => {
+  if (!event.event.ctrlKey && !event.event.metaKey) return;
+  if (!event.target.position || !activeModel || !lsp) return;
+  void jumpToDefinition(activeModel, event.target.position);
+});
+
+async function jumpToDefinition(model: monaco.editor.ITextModel, position: monaco.Position): Promise<void> {
+  try {
+    const locations = await lsp?.definition(model, position);
+    const target = locations?.[0];
+    if (!target) return;
+
+    const targetUri = target.uri.toString();
+    let path = pathFromProjectUri(targetUri);
+    if (!path) {
+      const source = await readSource(targetUri);
+      path = source.path;
+      if (source.readOnly) {
+        readOnlyFiles.set(path, { path, content: source.content });
+        readOnlyByUri.set(targetUri, path);
+      } else if (!project.files.some((file) => file.path === path)) {
+        project.files.push({ path, content: source.content });
+      }
+    }
+    openFile(path);
+    editor.revealRangeInCenter(target.range);
+    editor.setPosition({ lineNumber: target.range.startLineNumber, column: target.range.startColumn });
+    editor.focus();
+  } catch (err) {
+    setDiagnostics(String(err));
+  }
+}
+
+function modelUriForPath(path: string): monaco.Uri {
+  const uri = readOnlyByUri.size > 0 ? [...readOnlyByUri.entries()].find(([, itemPath]) => itemPath === path)?.[0] : undefined;
+  if (uri) return monaco.Uri.parse(uri);
+  return monaco.Uri.parse(`${projectRootUri}/${path.split("/").map(encodeURIComponent).join("/")}`);
+}
+
+function pathFromProjectUri(uri: string): string | undefined {
+  const root = projectRootUri.toLowerCase();
+  const candidate = uri.toLowerCase();
+  if (!root || !candidate.startsWith(root + "/")) return undefined;
+  const encoded = uri.slice(projectRootUri.length + 1);
+  const path = encoded
+    .split("/")
+    .map((part) => decodeURIComponent(part))
+    .join("/");
+  return project.files.some((file) => file.path === path) ? path : undefined;
+}
+
+function pathToFileUri(path: string): string {
+  return monaco.Uri.file(path).toString();
+}
+
+function normalizeProjectPath(path: string): string {
+  return path.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
+}
+
+function validateEditableSourcePath(path: string): string | undefined {
+  if (!path) return "File name is required.";
+  if (path.startsWith("/") || /^[A-Za-z]:/.test(path)) return "Absolute paths are not allowed.";
+  if (!path.endsWith(".c") && !path.endsWith(".h")) return "File name must end with .c or .h.";
+  if (/[<>:"|?*]/.test(path)) return "File name contains characters Windows cannot store.";
+
+  const reserved = new Set(["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]);
+  for (const part of path.split("/")) {
+    if (!part || part === "." || part === "..") return "Path segments must be normal file or folder names.";
+    const stem = part.split(".")[0].toUpperCase();
+    if (reserved.has(stem)) return `${part} is a reserved Windows file name.`;
+  }
+  return undefined;
+}
+
+function shortcutTargetPath(target: EventTarget | null): string {
+  if (!(target instanceof Element)) return "";
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return "";
+  }
+  if (!modalBackdropEl.hidden && modalBackdropEl.contains(target)) return "";
+  if (!fileMenuEl.hidden && fileMenuEl.contains(target)) return "";
+
+  const fileButton = target.closest<HTMLButtonElement>(".file");
+  if (fileButton?.dataset.path) return fileButton.dataset.path;
+  if (target.closest(".editor")) return activeEditorPath() || project.activeFile;
+  if (target === document.body) return activeEditorPath() || project.activeFile;
+  return "";
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  return left.localeCompare(right, undefined, { sensitivity: "accent" }) === 0;
+}
+
+function cloneProject(state: ProjectState): ProjectState {
+  return {
+    activeFile: state.activeFile,
+    compilerArgs: state.compilerArgs,
+    files: state.files.map((file) => ({ path: file.path, content: file.content }))
+  };
+}
+
+function must<T extends Element = HTMLElement>(selector: string): T {
+  const el = document.querySelector<T>(selector);
+  if (!el) throw new Error(`missing ${selector}`);
+  return el;
+}
+
+window.addEventListener("beforeunload", () => {
+  persistOpenTabs();
+  lsp?.dispose();
+});

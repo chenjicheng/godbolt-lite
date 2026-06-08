@@ -1,0 +1,15 @@
+.gocache/
+node_modules/
+web/node_modules/
+internal/app/static/**
+!internal/app/static/.gitkeep
+internal/app/toolchains/*.zip
+dist/
+dist-single/
+dist-slim/
+downloads/
+tmp-smoke-*/
+tmp-*-project/
+tmp-*-cache/
+tmp-*
+*.log
