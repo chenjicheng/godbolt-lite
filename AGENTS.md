@@ -41,6 +41,9 @@ Important backend endpoints:
 - Keep edits scoped to the requested behavior.
 - Prefer existing local patterns over new abstractions.
 - Prefer mature, maintained libraries for protocol parsing, network framing, archive handling, process isolation, language parsing, and other security-sensitive primitives. Do not hand-roll these when a practical library is available.
+- Keep modules cohesive and reviewable. New frontend files should have one clear responsibility, imports before implementation, and no duplicate imports from the same module. Large files should be split before adding more behavior unless the split would create artificial coupling.
+- Bias toward small, self-contained changes that improve code health. A change that affects build, release, runtime behavior, or user workflow must update tests and docs in the same commit.
+- Treat raw `innerHTML`, custom parsers, archive extraction, path containment, process management, and network protocols as restricted APIs. Use maintained libraries or a documented wrapper with tests.
 - Use `rg` for search.
 - Use `apply_patch` for manual file edits.
 - Avoid destructive filesystem operations. If cleanup is needed, identify exact targets first.

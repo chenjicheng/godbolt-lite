@@ -19,6 +19,8 @@ import (
 var embeddedToolchains embed.FS
 
 const toolchainReadyMarker = ".mini-godbolt-toolchain-ready"
+const maxEmbeddedToolchainEntries = 20000
+const maxEmbeddedToolchainUncompressedBytes = 700 << 20
 
 type Toolchain struct {
 	Clang   string
@@ -28,6 +30,7 @@ type Toolchain struct {
 }
 
 func EnsureToolchain(cfg Config) (Toolchain, error) {
+	var discoveryErrors []error
 	if tc, ok := discoverSidecarToolchain(cfg.ExeDir); ok {
 		return tc, nil
 	}
@@ -38,11 +41,14 @@ func EnsureToolchain(cfg Config) (Toolchain, error) {
 		return tc, nil
 	} else if tc, ok := discoverEmbeddedToolchain(cfg.CacheDir); ok {
 		return tc, nil
+	} else {
+		discoveryErrors = append(discoveryErrors, fmt.Errorf("embedded LLVM extraction failed: %w", err))
 	}
 	if tc, ok := discoverPATHToolchain(); ok {
 		return tc, nil
 	}
-	return Toolchain{}, errors.New("clang/clangd not found; add an embedded LLVM zip at internal/app/toolchains/llvm-windows-amd64.zip before release build, place LLVM next to the exe under toolchain/bin, or install LLVM on PATH for development")
+	discoveryErrors = append([]error{errors.New("clang/clangd not found; add an embedded LLVM zip at internal/app/toolchains/llvm-windows-amd64.zip before release build, place LLVM next to the exe under toolchain/bin, or install LLVM on PATH for development")}, discoveryErrors...)
+	return Toolchain{}, errors.Join(discoveryErrors...)
 }
 
 func discoverSidecarToolchain(exeDir string) (Toolchain, bool) {
@@ -115,8 +121,13 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 	}
 	defer os.RemoveAll(tempRoot)
 
+	if err := validateEmbeddedZipEntries(zr); err != nil {
+		return Toolchain{}, err
+	}
+
 	for _, file := range zr.File {
-		cleanName := filepath.Clean(strings.ReplaceAll(file.Name, "\\", "/"))
+		archiveName := strings.ReplaceAll(file.Name, "\\", "/")
+		cleanName := filepath.Clean(archiveName)
 		if cleanName == "." || filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." {
 			return Toolchain{}, fmt.Errorf("embedded LLVM archive contains unsafe path %q", file.Name)
 		}
@@ -124,11 +135,14 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 		if err := ensurePathInside(tempRoot, target); err != nil {
 			return Toolchain{}, err
 		}
-		if file.FileInfo().IsDir() {
+		if isZipDirectory(file, archiveName) {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return Toolchain{}, err
 			}
 			continue
+		}
+		if !file.Mode().IsRegular() {
+			return Toolchain{}, fmt.Errorf("embedded LLVM archive contains unsupported non-regular entry %q", file.Name)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return Toolchain{}, err
@@ -174,6 +188,30 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 		return tc, nil
 	}
 	return Toolchain{}, fmt.Errorf("embedded LLVM archive extracted but validated toolchain was not found under %s", root)
+}
+
+func validateEmbeddedZipEntries(zr *zip.Reader) error {
+	if len(zr.File) > maxEmbeddedToolchainEntries {
+		return fmt.Errorf("embedded LLVM archive has %d entries; maximum is %d", len(zr.File), maxEmbeddedToolchainEntries)
+	}
+	var total uint64
+	for _, file := range zr.File {
+		total += file.UncompressedSize64
+		if total > maxEmbeddedToolchainUncompressedBytes {
+			return fmt.Errorf("embedded LLVM archive expands beyond %d bytes", maxEmbeddedToolchainUncompressedBytes)
+		}
+		if isZipDirectory(file, strings.ReplaceAll(file.Name, "\\", "/")) {
+			continue
+		}
+		if !file.Mode().IsRegular() {
+			return fmt.Errorf("embedded LLVM archive contains unsupported non-regular entry %q", file.Name)
+		}
+	}
+	return nil
+}
+
+func isZipDirectory(file *zip.File, archiveName string) bool {
+	return file.FileInfo().IsDir() || strings.HasSuffix(archiveName, "/")
 }
 
 func discoverPATHToolchain() (Toolchain, bool) {

@@ -3,10 +3,12 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -38,9 +40,13 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"http://" + r.Host, "https://" + r.Host},
-	})
+	acceptOptions, err := lspAcceptOptions(r)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, acceptOptions)
 	if err != nil {
 		log.Printf("websocket upgrade failed: %v", err)
 		return
@@ -58,6 +64,10 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 	}
 	if firstType != websocket.MessageText && firstType != websocket.MessageBinary {
 		conn.Close(websocket.StatusUnsupportedData, "LSP messages must be text or binary")
+		return
+	}
+	if !isLSPInitializeMessage(firstMessage) {
+		conn.Close(websocket.StatusPolicyViolation, "first LSP message must be initialize")
 		return
 	}
 
@@ -219,4 +229,40 @@ func (w logWriter) Write(p []byte) (int, error) {
 		log.Printf("%s: %s", w.name, text)
 	}
 	return len(p), nil
+}
+
+type lspWireMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+}
+
+func isLSPInitializeMessage(msg []byte) bool {
+	var wire lspWireMessage
+	if err := json.Unmarshal(msg, &wire); err != nil {
+		return false
+	}
+	return wire.JSONRPC == "2.0" && wire.Method == "initialize" && len(wire.ID) > 0 && string(wire.ID) != "null"
+}
+
+func lspAcceptOptions(r *http.Request) (*websocket.AcceptOptions, error) {
+	if !isLoopbackHost(r.Host) {
+		return nil, fmt.Errorf("LSP WebSocket host %q is not loopback", r.Host)
+	}
+	return &websocket.AcceptOptions{
+		OriginPatterns: []string{"http://" + r.Host, "https://" + r.Host},
+	}, nil
+}
+
+func isLoopbackHost(value string) bool {
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		host = value
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

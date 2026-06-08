@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,30 @@ func TestWriteLSPMessageRejectsOversizedMessage(t *testing.T) {
 	msg := bytes.Repeat([]byte("x"), maxLSPMessageBytes+1)
 	if err := writeLSPMessage(bytes.NewBuffer(nil), msg); err == nil {
 		t.Fatal("writeLSPMessage accepted oversized message")
+	}
+}
+
+func TestIsLSPInitializeMessage(t *testing.T) {
+	if !isLSPInitializeMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)) {
+		t.Fatal("initialize request was rejected")
+	}
+	for _, msg := range [][]byte{
+		[]byte(`{"jsonrpc":"2.0","method":"initialized","params":{}}`),
+		[]byte(`{"jsonrpc":"2.0","id":null,"method":"initialize","params":{}}`),
+		[]byte(`not json`),
+	} {
+		if isLSPInitializeMessage(msg) {
+			t.Fatalf("invalid initial message accepted: %s", string(msg))
+		}
+	}
+}
+
+func TestLSPAcceptOptionsRequiresLoopbackHost(t *testing.T) {
+	if _, err := lspAcceptOptions(&http.Request{Host: "127.0.0.1:57070"}); err != nil {
+		t.Fatalf("loopback host rejected: %v", err)
+	}
+	if _, err := lspAcceptOptions(&http.Request{Host: "example.com:57070"}); err == nil {
+		t.Fatal("non-loopback host accepted")
 	}
 }
 

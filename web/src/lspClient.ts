@@ -20,7 +20,7 @@ export interface LspHandle {
 
 interface JsonRpcMessage {
   jsonrpc: "2.0";
-  id?: number;
+  id?: number | string;
   method?: string;
   params?: unknown;
   result?: unknown;
@@ -126,7 +126,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
-    if (message.id !== undefined && pending.has(message.id)) {
+    if (typeof message.id === "number" && pending.has(message.id)) {
       const request = pending.get(message.id);
       pending.delete(message.id);
       if (!request) return;
@@ -141,6 +141,11 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
 
     if (message.method === "textDocument/publishDiagnostics") {
       applyDiagnostics(message.params);
+      return;
+    }
+
+    if (message.id !== undefined && message.method) {
+      sendErrorResponse(message.id, -32601, `Unsupported LSP request: ${message.method}`);
     }
   }
 
@@ -180,6 +185,19 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
         jsonrpc: "2.0",
         method,
         params
+      })
+    );
+  }
+
+  function sendErrorResponse(id: number | string, code: number, message: string) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        error: { code, message }
       })
     );
   }

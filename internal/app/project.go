@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	securejoin "github.com/cyphar/filepath-securejoin"
 )
 
 type ProjectFile struct {
@@ -294,6 +296,9 @@ func cleanProjectPath(path string) (string, error) {
 	if filepath.IsAbs(path) || filepath.VolumeName(path) != "" || strings.HasPrefix(path, "/") {
 		return "", fmt.Errorf("absolute project path %q is not allowed", path)
 	}
+	if path == "external" || strings.HasPrefix(path, "external/") {
+		return "", fmt.Errorf("project path %q uses the reserved external namespace", path)
+	}
 	if strings.ContainsAny(path, `<>:"|?*`) {
 		return "", fmt.Errorf("project path %q contains Windows-invalid characters", path)
 	}
@@ -357,6 +362,21 @@ func ensurePathInside(root, target string) error {
 		return err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("target %q escapes root %q", absTarget, absRoot)
+	}
+	joined, err := securejoin.SecureJoin(filepath.Clean(absRoot), rel)
+	if err != nil {
+		return err
+	}
+	joinedAbs, err := filepath.Abs(joined)
+	if err != nil {
+		return err
+	}
+	joinedRel, err := filepath.Rel(absRoot, joinedAbs)
+	if err != nil {
+		return err
+	}
+	if joinedRel == ".." || strings.HasPrefix(joinedRel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("target %q escapes root %q", absTarget, absRoot)
 	}
 

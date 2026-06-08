@@ -10,7 +10,7 @@ import (
 )
 
 func TestCleanProjectPathRejectsTraversal(t *testing.T) {
-	bad := []string{"../main.c", "..\\main.c", "/main.c", "C:/tmp/main.c", "bad:name.c", "CON.c", "folder/../main.c", ""}
+	bad := []string{"../main.c", "..\\main.c", "/main.c", "C:/tmp/main.c", "bad:name.c", "CON.c", "folder/../main.c", "external/foo.h", ""}
 	for _, path := range bad {
 		if _, err := cleanProjectPath(path); err == nil {
 			t.Fatalf("cleanProjectPath(%q) succeeded, want error", path)

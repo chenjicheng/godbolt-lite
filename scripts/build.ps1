@@ -8,6 +8,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $embeddedToolchainZip = ".\internal\app\toolchains\llvm-windows-amd64.zip"
+$maxToolchainZipEntries = 20000
+$maxToolchainZipUncompressedBytes = 700MB
+
+if ($Release -and $SkipFrontend) {
+    throw "Release build cannot use -SkipFrontend; the embedded UI must be rebuilt for release."
+}
 
 function Assert-EmbeddedToolchainZip {
     param(
@@ -23,10 +29,28 @@ function Assert-EmbeddedToolchainZip {
     $resolvedZip = (Resolve-Path $ZipPath).Path
     $zip = [System.IO.Compression.ZipFile]::OpenRead($resolvedZip)
     try {
-        $entryNames = @(
-            $zip.Entries |
-                ForEach-Object { $_.FullName.Replace("\", "/").TrimStart([char[]]@("/")) }
-        )
+        if ($zip.Entries.Count -gt $maxToolchainZipEntries) {
+            throw "Embedded LLVM zip has $($zip.Entries.Count) entries; maximum is $maxToolchainZipEntries."
+        }
+        $uncompressedBytes = 0L
+        $entryNames = @()
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName.Replace("\", "/").TrimStart([char[]]@("/"))
+            if (
+                [string]::IsNullOrWhiteSpace($name) -or
+                $name.StartsWith("../") -or
+                $name.Contains("/../") -or
+                $name -match '^[A-Za-z]:' -or
+                $name.StartsWith("/")
+            ) {
+                throw "Embedded LLVM zip contains unsafe entry path '$($entry.FullName)'."
+            }
+            $uncompressedBytes += $entry.Length
+            if ($uncompressedBytes -gt $maxToolchainZipUncompressedBytes) {
+                throw "Embedded LLVM zip expands beyond $maxToolchainZipUncompressedBytes bytes."
+            }
+            $entryNames += $name
+        }
         foreach ($required in @("bin/clang.exe", "bin/clangd.exe", "bin/lld-link.exe")) {
             if ($entryNames -notcontains $required) {
                 throw "Embedded LLVM zip is missing $required."
@@ -47,6 +71,60 @@ function Assert-EmbeddedToolchainZip {
     }
 }
 
+function Get-FreeLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 0)
+    $listener.Start()
+    try {
+        return $listener.LocalEndpoint.Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Assert-ReleaseSmoke {
+    $port = Get-FreeLoopbackPort
+    $smokeRoot = Join-Path $root ".tmp\release-smoke"
+    $projectDir = Join-Path $smokeRoot "project"
+    $cacheDir = Join-Path $smokeRoot "cache"
+    $stdoutPath = Join-Path $smokeRoot "stdout.log"
+    $stderrPath = Join-Path $smokeRoot "stderr.log"
+    if (Test-Path $smokeRoot) {
+        Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+
+    $proc = Start-Process `
+        -FilePath ".\dist\mini-godbolt.exe" `
+        -ArgumentList @("-addr", "127.0.0.1:$port", "-no-browser", "-project-dir", $projectDir, "-cache-dir", $cacheDir) `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden `
+        -PassThru
+    try {
+        $deadline = (Get-Date).AddSeconds(25)
+        do {
+            if ($proc.HasExited) {
+                $stderr = if (Test-Path $stderrPath) { Get-Content -Raw $stderrPath } else { "" }
+                throw "Release smoke process exited early with code $($proc.ExitCode). $stderr"
+            }
+            try {
+                $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/status" -TimeoutSec 2
+                if ($status.ready -eq $true) {
+                    return
+                }
+            } catch {
+                Start-Sleep -Milliseconds 300
+            }
+        } while ((Get-Date) -lt $deadline)
+        throw "Release smoke did not report ready=true before timeout."
+    } finally {
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+        }
+    }
+}
+
 if ($Release) {
     Assert-EmbeddedToolchainZip $embeddedToolchainZip
     if (Test-Path ".\dist\toolchain") {
@@ -58,7 +136,7 @@ if (-not $SkipFrontend) {
     if (Test-Path ".\web\package.json") {
         Push-Location ".\web"
         try {
-            npm.cmd ci
+            npm.cmd ci --ignore-scripts
             npm.cmd run build
         } finally {
             Pop-Location
@@ -76,10 +154,17 @@ New-Item -ItemType Directory -Force -Path $env:GOCACHE, $env:GOTMPDIR, $env:TEMP
 go test ./...
 New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
 go build -trimpath -ldflags="-s -w" -o ".\dist\mini-godbolt.exe" .\cmd\mini-godbolt
+if (Test-Path ".\dist\include") {
+    Remove-Item -LiteralPath ".\dist\include" -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path ".\dist\include" | Out-Null
 
 if (Test-Path ".\include") {
     Copy-Item -Path ".\include\*" -Destination ".\dist\include" -Recurse -Force
+}
+
+if ($Release) {
+    Assert-ReleaseSmoke
 }
 
 if (

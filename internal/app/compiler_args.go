@@ -1,8 +1,9 @@
 package app
 
 import (
-	"fmt"
 	"strings"
+
+	"github.com/google/shlex"
 )
 
 const windowsDefaultCompilerArgs = "-Og -g0 -fno-asynchronous-unwind-tables -fno-stack-protector -fno-ident -fno-addrsig"
@@ -27,38 +28,9 @@ func normalizeCompilerArgs(value string) string {
 }
 
 func splitCompilerArgs(input string) ([]string, error) {
-	var args []string
-	var current strings.Builder
-	var quote rune
+	return shlex.Split(preserveBackslashesForShlex(input))
+}
 
-	for _, r := range input {
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			} else {
-				current.WriteRune(r)
-			}
-			continue
-		}
-
-		switch r {
-		case '\'', '"':
-			quote = r
-		case ' ', '\t', '\r', '\n':
-			if current.Len() > 0 {
-				args = append(args, current.String())
-				current.Reset()
-			}
-		default:
-			current.WriteRune(r)
-		}
-	}
-
-	if quote != 0 {
-		return nil, fmt.Errorf("unterminated quote in compiler arguments")
-	}
-	if current.Len() > 0 {
-		args = append(args, current.String())
-	}
-	return args, nil
+func preserveBackslashesForShlex(input string) string {
+	return strings.ReplaceAll(input, `\`, `\\`)
 }

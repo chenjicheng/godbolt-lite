@@ -81,8 +81,12 @@ func TestValidateCompilerArgsRejectsUnsafeInputs(t *testing.T) {
 		{"--", "scratch.c"},
 		{"-o", "out.exe"},
 		{"-Xclang", "-load"},
+		{"-fpass-plugin=evil.dll"},
+		{"-load-pass-plugin=evil.dll"},
+		{"-mllvm=-load"},
 		{"-I", filepath.Join(outsideDir, "include")},
 		{"-fuse-ld", filepath.Join(outsideDir, "lld-link.exe")},
+		{"-fuse-ld=evil"},
 	}
 	for _, args := range cases {
 		if err := compiler.validateCompilerArgs(args); err == nil {
@@ -102,6 +106,7 @@ func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
 		"-g0",
 		"-std=c17",
 		"-D", "NAME=1",
+		"-masm=intel",
 		"-I", filepath.Join(projectDir, "headers"),
 		"-include", "config.h",
 		"-fuse-ld=lld",
@@ -121,7 +126,13 @@ func TestRunSourcePathsFollowsLocalHeaderImplementations(t *testing.T) {
 	writeTestFile(t, projectDir, "scratch.c", "int main(void){return 99;}\n")
 
 	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
-	paths, err := compiler.runSourcePaths(filepath.Join(projectDir, "main.c"))
+	mainPath := filepath.Join(projectDir, "main.c")
+	utilPath := filepath.Join(projectDir, "util.c")
+	utilHeader := filepath.Join(projectDir, "util.h")
+	paths, err := compiler.discoverRunSourcePaths(context.Background(), mainPath, fakeDependencyReader(map[string][]string{
+		mainPath: {mainPath, utilHeader},
+		utilPath: {utilPath, utilHeader},
+	}))
 	if err != nil {
 		t.Fatalf("runSourcePaths failed: %v", err)
 	}
@@ -139,7 +150,13 @@ func TestRunSourcePathsFollowsIncludeFolderHeaderImplementations(t *testing.T) {
 	writeTestFile(t, includeDir, "vendor/unused.c", "int unused(void){return 1;}\n")
 
 	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
-	paths, err := compiler.runSourcePaths(filepath.Join(projectDir, "main.c"))
+	mainPath := filepath.Join(projectDir, "main.c")
+	fooHeader := filepath.Join(includeDir, "vendor", "foo.h")
+	fooSource := filepath.Join(includeDir, "vendor", "foo.c")
+	paths, err := compiler.discoverRunSourcePaths(context.Background(), mainPath, fakeDependencyReader(map[string][]string{
+		mainPath:  {mainPath, fooHeader},
+		fooSource: {fooSource, fooHeader},
+	}))
 	if err != nil {
 		t.Fatalf("runSourcePaths failed: %v", err)
 	}
@@ -198,4 +215,15 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func fakeDependencyReader(deps map[string][]string) dependencyReader {
+	return func(_ context.Context, sourcePath string) ([]string, error) {
+		for path, values := range deps {
+			if strings.EqualFold(path, sourcePath) {
+				return values, nil
+			}
+		}
+		return nil, nil
+	}
 }

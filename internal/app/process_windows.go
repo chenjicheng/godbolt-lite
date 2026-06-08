@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"unsafe"
@@ -61,7 +62,12 @@ func runCommand(ctx context.Context, cmd *exec.Cmd) error {
 
 	job := createKillOnCloseJob()
 	if job != 0 {
-		assignProcessToJob(job, cmd.Process.Pid)
+		if err := assignProcessToJob(job, cmd.Process.Pid); err != nil {
+			closeHandle(job)
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return err
+		}
 	}
 
 	done := make(chan error, 1)
@@ -105,13 +111,20 @@ func createKillOnCloseJob() syscall.Handle {
 	return syscall.Handle(handle)
 }
 
-func assignProcessToJob(job syscall.Handle, pid int) {
+func assignProcessToJob(job syscall.Handle, pid int) error {
 	process, err := syscall.OpenProcess(processSetQuota|processTerminate, false, uint32(pid))
 	if err != nil {
-		return
+		return err
 	}
 	defer syscall.CloseHandle(process)
-	procAssignProcessToJob.Call(uintptr(job), uintptr(process))
+	ok, _, callErr := procAssignProcessToJob.Call(uintptr(job), uintptr(process))
+	if ok == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return fmt.Errorf("AssignProcessToJobObject failed")
+	}
+	return nil
 }
 
 func closeHandle(handle syscall.Handle) {

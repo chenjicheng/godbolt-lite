@@ -14,6 +14,63 @@ $extractDir = Join-Path $downloads "llvm-extract-$Version"
 $fullDir = Join-Path $extractDir "clang+llvm-$Version-x86_64-pc-windows-msvc"
 $toolchainDir = Join-Path $root "dist\toolchain"
 $zipPath = Join-Path $root "internal\app\toolchains\llvm-windows-amd64.zip"
+$maxToolchainZipEntries = 20000
+$maxToolchainZipUncompressedBytes = 700MB
+
+function Normalize-ArchiveEntryName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+    return $Name.Replace("\", "/").TrimStart([char[]]@("/"))
+}
+
+function Assert-ArchiveEntryNameSafe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $normalized = Normalize-ArchiveEntryName $Name
+    if (
+        [string]::IsNullOrWhiteSpace($normalized) -or
+        $normalized.StartsWith("../") -or
+        $normalized.Contains("/../") -or
+        $normalized -match '^[A-Za-z]:' -or
+        $normalized.StartsWith("/")
+    ) {
+        throw "Archive contains unsafe entry path '$Name'."
+    }
+}
+
+function Assert-TarArchiveSafe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $entries = tar -tf $ArchivePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not list tar archive entries."
+    }
+    foreach ($entry in $entries) {
+        Assert-ArchiveEntryNameSafe $entry
+    }
+
+    $verboseEntries = tar -tvf $ArchivePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect tar archive entry types."
+    }
+    foreach ($line in $verboseEntries) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        $type = $line[0]
+        if ($type -in @("l", "h", "c", "b", "p")) {
+            throw "Archive contains unsupported non-regular entry: $line"
+        }
+    }
+}
 
 function New-ToolchainZip {
     param(
@@ -32,14 +89,21 @@ function New-ToolchainZip {
     $sourceRoot = (Resolve-Path $SourceDir).Path.TrimEnd([char[]]@("\", "/"))
     $zip = [System.IO.Compression.ZipFile]::Open($DestinationPath, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
-        Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
-            $entryName = $_.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
-            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                $zip,
-                $_.FullName,
-                $entryName,
-                [System.IO.Compression.CompressionLevel]::Optimal
-            ) | Out-Null
+        $files = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
+            Sort-Object @{ Expression = { $_.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/") } }
+        foreach ($file in $files) {
+            $entryName = $file.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
+            Assert-ArchiveEntryNameSafe $entryName
+            $entry = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = [DateTimeOffset]::FromUnixTimeSeconds(0)
+            $src = [System.IO.File]::OpenRead($file.FullName)
+            $dst = $entry.Open()
+            try {
+                $src.CopyTo($dst)
+            } finally {
+                $dst.Dispose()
+                $src.Dispose()
+            }
         }
     } finally {
         $zip.Dispose()
@@ -55,10 +119,20 @@ function Assert-ToolchainZipShape {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $ZipPath).Path)
     try {
-        $entryNames = @(
-            $zip.Entries |
-                ForEach-Object { $_.FullName.Replace("\", "/").TrimStart([char[]]@("/")) }
-        )
+        if ($zip.Entries.Count -gt $maxToolchainZipEntries) {
+            throw "Toolchain zip has $($zip.Entries.Count) entries; maximum is $maxToolchainZipEntries."
+        }
+        $uncompressedBytes = 0L
+        $entryNames = @()
+        foreach ($entry in $zip.Entries) {
+            $name = Normalize-ArchiveEntryName $entry.FullName
+            Assert-ArchiveEntryNameSafe $name
+            $uncompressedBytes += $entry.Length
+            if ($uncompressedBytes -gt $maxToolchainZipUncompressedBytes) {
+                throw "Toolchain zip expands beyond $maxToolchainZipUncompressedBytes bytes."
+            }
+            $entryNames += $name
+        }
         foreach ($required in @("bin/clang.exe", "bin/clangd.exe", "bin/lld-link.exe")) {
             if ($entryNames -notcontains $required) {
                 throw "Toolchain zip is missing $required."
@@ -94,6 +168,7 @@ if (Test-Path $extractDir) {
     Remove-Item -LiteralPath $extractDir -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+Assert-TarArchiveSafe $archive
 tar -xf $archive -C $extractDir
 $clangResourceRoot = Join-Path $fullDir "lib\clang"
 $clangResourceDir = Get-ChildItem -LiteralPath $clangResourceRoot -Directory |

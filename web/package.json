@@ -9,6 +9,7 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "dompurify": "^3.4.0",
     "monaco-editor": "^0.55.1"
   },
   "overrides": {
