@@ -79,7 +79,7 @@ func combineOutput(left, right string) string {
 	return left + "\n" + right
 }
 
-func runArtifactName(requestID string, start time.Time) string {
+func runArtifactPrefix(requestID string, start time.Time) string {
 	var b strings.Builder
 	b.WriteString("program-")
 	for _, r := range requestID {
@@ -93,5 +93,6 @@ func runArtifactName(requestID string, start time.Time) string {
 	if b.Len() == len("program-") {
 		b.WriteString(fmt.Sprintf("%d", start.UnixNano()))
 	}
+	b.WriteByte('-')
 	return b.String()
 }

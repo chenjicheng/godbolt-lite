@@ -122,6 +122,10 @@ func (p *ProjectStore) writeLocked(state, previous ProjectState) error {
 	if err := os.MkdirAll(p.dir, 0o755); err != nil {
 		return err
 	}
+	compilerArgs, err := p.compilerArgsForState(state)
+	if err != nil {
+		return err
+	}
 	if err := p.removeDeletedFilesLocked(previous, state); err != nil {
 		return err
 	}
@@ -145,7 +149,7 @@ func (p *ProjectStore) writeLocked(state, previous ProjectState) error {
 	if err := os.WriteFile(filepath.Join(p.dir, "project.json"), manifest, 0o644); err != nil {
 		return err
 	}
-	return p.writeCompileCommandsLocked(state)
+	return p.writeCompileCommandsLocked(state, compilerArgs)
 }
 
 func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) error {
@@ -171,12 +175,8 @@ func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) err
 	return nil
 }
 
-func (p *ProjectStore) writeCompileCommandsLocked(state ProjectState) error {
+func (p *ProjectStore) writeCompileCommandsLocked(state ProjectState, compilerArgs []string) error {
 	var commands []commandEntry
-	compilerArgs, err := splitCompilerArgs(defaultIfEmpty(state.CompilerArgs, defaultCompilerArgs))
-	if err != nil {
-		return err
-	}
 	for _, file := range state.Files {
 		if strings.EqualFold(filepath.Ext(file.Path), ".c") {
 			absFile := filepath.Join(p.dir, filepath.FromSlash(file.Path))
@@ -193,6 +193,11 @@ func (p *ProjectStore) writeCompileCommandsLocked(state ProjectState) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(p.dir, "compile_commands.json"), out, 0o644)
+}
+
+func (p *ProjectStore) compilerArgsForState(state ProjectState) ([]string, error) {
+	compiler := NewCompiler(p.clangPath, p.dir, p.includeDir, p.systemIncludeDir)
+	return compiler.compilerArgsFromString(state.CompilerArgs)
 }
 
 func (p *ProjectStore) includeSourceCommands(compilerArgs []string) ([]commandEntry, error) {
@@ -298,6 +303,9 @@ func cleanProjectPath(path string) (string, error) {
 	}
 	if path == "external" || strings.HasPrefix(path, "external/") {
 		return "", fmt.Errorf("project path %q uses the reserved external namespace", path)
+	}
+	if path == ".mini-godbolt-run" || strings.HasPrefix(path, ".mini-godbolt-run/") {
+		return "", fmt.Errorf("project path %q uses the reserved runtime namespace", path)
 	}
 	if strings.ContainsAny(path, `<>:"|?*`) {
 		return "", fmt.Errorf("project path %q contains Windows-invalid characters", path)

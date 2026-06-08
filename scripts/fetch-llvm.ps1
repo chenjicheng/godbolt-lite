@@ -4,8 +4,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Version must use the form '<major>.<minor>.<patch>'."
+}
 
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "path-guards.ps1")
 $downloads = Join-Path $root "downloads"
 $archiveName = "clang+llvm-$Version-x86_64-pc-windows-msvc.tar.xz"
 $archive = Join-Path $downloads $archiveName
@@ -22,7 +26,7 @@ function Normalize-ArchiveEntryName {
         [Parameter(Mandatory = $true)]
         [string]$Name
     )
-    return $Name.Replace("\", "/").TrimStart([char[]]@("/"))
+    return ConvertTo-SafeArchiveEntryName $Name
 }
 
 function Assert-ArchiveEntryNameSafe {
@@ -31,16 +35,7 @@ function Assert-ArchiveEntryNameSafe {
         [string]$Name
     )
 
-    $normalized = Normalize-ArchiveEntryName $Name
-    if (
-        [string]::IsNullOrWhiteSpace($normalized) -or
-        $normalized.StartsWith("../") -or
-        $normalized.Contains("/../") -or
-        $normalized -match '^[A-Za-z]:' -or
-        $normalized.StartsWith("/")
-    ) {
-        throw "Archive contains unsafe entry path '$Name'."
-    }
+    [void](ConvertTo-SafeArchiveEntryName $Name)
 }
 
 function Assert-TarArchiveSafe {
@@ -125,8 +120,8 @@ function Assert-ToolchainZipShape {
         $uncompressedBytes = 0L
         $entryNames = @()
         foreach ($entry in $zip.Entries) {
+            Assert-ArchiveEntryNameSafe $entry.FullName
             $name = Normalize-ArchiveEntryName $entry.FullName
-            Assert-ArchiveEntryNameSafe $name
             $uncompressedBytes += $entry.Length
             if ($uncompressedBytes -gt $maxToolchainZipUncompressedBytes) {
                 throw "Toolchain zip expands beyond $maxToolchainZipUncompressedBytes bytes."
@@ -165,7 +160,7 @@ if ($actualHash -ne $Sha256.ToLowerInvariant()) {
 }
 
 if (Test-Path $extractDir) {
-    Remove-Item -LiteralPath $extractDir -Recurse -Force
+    Remove-DirectoryInsideRoot -BaseDir $root -Path $extractDir
 }
 New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 Assert-TarArchiveSafe $archive
@@ -179,7 +174,7 @@ if (-not $clangResourceDir) {
 }
 
 if (Test-Path $toolchainDir) {
-    Remove-Item -LiteralPath $toolchainDir -Recurse -Force
+    Remove-DirectoryInsideRoot -BaseDir $root -Path $toolchainDir
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $toolchainDir "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $toolchainDir "lib\clang") | Out-Null

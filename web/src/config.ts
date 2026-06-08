@@ -21,6 +21,8 @@ export const filesVisibleStorageKey = "mini-godbolt.view.filesVisible";
 export const asmVisibleStorageKey = "mini-godbolt.view.asmVisible";
 export const consoleVisibleStorageKey = "mini-godbolt.view.consoleVisible";
 export const openTabsStorageKey = "mini-godbolt.openTabsState";
+export const draftProjectStorageKey = "mini-godbolt.projectDraft";
+export const maxPersistedDraftAgeMs = 30 * 60 * 1000;
 
 export const minFontScale = 0.85;
 export const maxFontScale = 1.55;

@@ -10,7 +10,7 @@ import (
 )
 
 func TestCleanProjectPathRejectsTraversal(t *testing.T) {
-	bad := []string{"../main.c", "..\\main.c", "/main.c", "C:/tmp/main.c", "bad:name.c", "CON.c", "folder/../main.c", "external/foo.h", ""}
+	bad := []string{"../main.c", "..\\main.c", "/main.c", "C:/tmp/main.c", "bad:name.c", "CON.c", "folder/../main.c", "external/foo.h", ".mini-godbolt-run/main.c", ""}
 	for _, path := range bad {
 		if _, err := cleanProjectPath(path); err == nil {
 			t.Fatalf("cleanProjectPath(%q) succeeded, want error", path)
@@ -64,6 +64,61 @@ func TestProjectStoreSyncWritesFilesAndCompileCommands(t *testing.T) {
 		!strings.Contains(text, "-isystem") ||
 		!strings.Contains(text, systemIncludeDir) {
 		t.Fatalf("compile_commands.json missing expected entries: %s", text)
+	}
+}
+
+func TestProjectStoreRejectsUnsafeCompilerArgsForCompileCommands(t *testing.T) {
+	dir := t.TempDir()
+	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	state := ProjectState{
+		ActiveFile:   "main.c",
+		CompilerArgs: "-Xclang -load",
+		Files: []ProjectFile{
+			{Path: "main.c", Content: "int main(void){return 0;}"},
+		},
+	}
+
+	if err := store.Sync(state); err == nil {
+		t.Fatal("Sync accepted unsafe compiler args")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compile_commands.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("compile_commands.json was written after rejected compiler args: %v", err)
+	}
+}
+
+func TestProjectStoreCompileCommandsUseNormalizedCompilerArgPaths(t *testing.T) {
+	dir := t.TempDir()
+	includeDir := filepath.Join(dir, "include")
+	vendorDir := filepath.Join(includeDir, "vendor")
+	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
+	state := ProjectState{
+		ActiveFile:   "main.c",
+		CompilerArgs: "-I vendor",
+		Files: []ProjectFile{
+			{Path: "main.c", Content: "int main(void){return 0;}"},
+		},
+	}
+
+	if err := store.Sync(state); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "compile_commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commands []commandEntry
+	if err := json.Unmarshal(data, &commands); err != nil {
+		t.Fatalf("compile_commands.json invalid: %v", err)
+	}
+	var text strings.Builder
+	for _, command := range commands {
+		text.WriteString(command.Command)
+	}
+	if !strings.Contains(text.String(), vendorDir) {
+		t.Fatalf("compile_commands.json did not contain normalized vendor path %q: %s", vendorDir, text.String())
 	}
 }
 

@@ -36,6 +36,10 @@ interface PendingRequest<T = unknown> {
 const owner = "lsp";
 const reconnectDelayMs = 1500;
 const requestTimeoutMs = 10000;
+const maxLspClientPayloadBytes = 8 << 20;
+const maxLspListItems = 5000;
+const maxSemanticTokenValues = 250000;
+const textEncoder = new TextEncoder();
 
 export function attachLspClient(options: LspClientOptions): LspHandle {
   const { monaco, editor, languageId, rootUri, getModels, onStatus } = options;
@@ -49,6 +53,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
   let semanticTokensDisposable: Monaco.IDisposable | undefined;
   const watchedModels = new WeakSet<Model>();
   const openedUris = new Set<string>();
+  const oversizedUris = new Set<string>();
 
   const uriForModel = (model: Model) => model.uri.toString();
 
@@ -97,6 +102,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
         })
         .catch((error) => {
           onStatus(`LSP initialize failed: ${error.message}`);
+          socket?.close(1011, "LSP initialize failed");
         });
     });
 
@@ -118,7 +124,16 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
     });
   }
 
-  function handleMessage(raw: string) {
+  function handleMessage(raw: unknown) {
+    if (typeof raw !== "string") {
+      return;
+    }
+    if (textEncoder.encode(raw).length > maxLspClientPayloadBytes) {
+      onStatus("LSP message too large");
+      socket?.close(1009, "LSP message too large");
+      return;
+    }
+
     let message: JsonRpcMessage;
     try {
       message = JSON.parse(raw) as JsonRpcMessage;
@@ -153,6 +168,9 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("LSP is not connected"));
     }
+    if (!initialized && method !== "initialize") {
+      return Promise.reject(new Error("LSP is not initialized"));
+    }
 
     const id = requestId;
     requestId += 1;
@@ -164,7 +182,9 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       params
     };
 
-    socket.send(JSON.stringify(message));
+    if (!sendJsonMessage(message)) {
+      return Promise.reject(new Error(`${method} message is too large for the LSP bridge`));
+    }
 
     return new Promise<T>((resolve, reject) => {
       const timeoutId = window.setTimeout(() => {
@@ -180,26 +200,35 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
-    socket.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        method,
-        params
-      })
-    );
+
+    sendJsonMessage({
+      jsonrpc: "2.0",
+      method,
+      params
+    });
   }
 
   function sendErrorResponse(id: number | string, code: number, message: string) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    socket.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id,
-        error: { code, message }
-      })
-    );
+    sendJsonMessage({
+      jsonrpc: "2.0",
+      id,
+      error: { code, message }
+    });
+  }
+
+  function sendJsonMessage(message: JsonRpcMessage): boolean {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    const raw = JSON.stringify(message);
+    if (textEncoder.encode(raw).length > maxLspClientPayloadBytes) {
+      return false;
+    }
+    socket.send(raw);
+    return true;
   }
 
   function openDocument(model: Model) {
@@ -213,15 +242,22 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
-    openedUris.add(uri);
-    sendNotification("textDocument/didOpen", {
+    const message: JsonRpcMessage = {
+      jsonrpc: "2.0",
+      method: "textDocument/didOpen",
+      params: {
       textDocument: {
         uri,
         languageId,
         version: model.getVersionId(),
         text: model.getValue()
       }
-    });
+      }
+    };
+    if (!sendDocumentMessage(uri, model, message)) {
+      return;
+    }
+    openedUris.add(uri);
   }
 
   function watchModel(model: Model) {
@@ -251,13 +287,36 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
-    sendNotification("textDocument/didChange", {
+    const message: JsonRpcMessage = {
+      jsonrpc: "2.0",
+      method: "textDocument/didChange",
+      params: {
       textDocument: {
         uri,
         version: model.getVersionId()
       },
       contentChanges: [{ text: model.getValue() }]
-    });
+      }
+    };
+    if (!sendDocumentMessage(uri, model, message)) {
+      sendNotification("textDocument/didClose", {
+        textDocument: { uri }
+      });
+      openedUris.delete(uri);
+    }
+  }
+
+  function sendDocumentMessage(uri: string, model: Model, message: JsonRpcMessage): boolean {
+    if (sendJsonMessage(message)) {
+      if (oversizedUris.delete(uri)) {
+        onStatus("LSP connected");
+      }
+      return true;
+    }
+    oversizedUris.add(uri);
+    monaco.editor.setModelMarkers(model, owner, []);
+    onStatus("LSP disabled for oversized file");
+    return false;
   }
 
   function applyDiagnostics(params: unknown) {
@@ -268,7 +327,9 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
     const record = params as Record<string, unknown>;
     const uri = typeof record.uri === "string" ? record.uri : undefined;
     const model = uri ? monaco.editor.getModel(monaco.Uri.parse(uri)) : undefined;
-    const diagnostics = Array.isArray(record.diagnostics) ? record.diagnostics : [];
+    const diagnostics = Array.isArray(record.diagnostics)
+      ? record.diagnostics.slice(0, maxLspListItems)
+      : [];
 
     if (!model) {
       return;
@@ -390,7 +451,9 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
             textDocument: { uri: uriForModel(model) }
           });
           const data = response && typeof response === "object" ? (response as Record<string, unknown>).data : undefined;
-          return { data: new Uint32Array(Array.isArray(data) ? data.filter(isNumber) : []) };
+          return {
+            data: new Uint32Array(Array.isArray(data) ? data.filter(isNumber).slice(0, maxSemanticTokenValues) : [])
+          };
         } catch {
           return { data: new Uint32Array() };
         }
@@ -454,9 +517,9 @@ function completionItemsFromLsp(
   result: unknown
 ): Monaco.languages.CompletionItem[] {
   const rawItems = Array.isArray(result)
-    ? result
+    ? result.slice(0, maxLspListItems)
     : result && typeof result === "object" && Array.isArray((result as Record<string, unknown>).items)
-      ? ((result as Record<string, unknown>).items as unknown[])
+      ? ((result as Record<string, unknown>).items as unknown[]).slice(0, maxLspListItems)
       : [];
   const word = model.getWordUntilPosition(position);
   const fallbackRange = new monaco.Range(
@@ -505,7 +568,7 @@ function hoverFromLsp(monaco: MonacoApi, result: unknown): Monaco.languages.Hove
 }
 
 function definitionsFromLsp(monaco: MonacoApi, result: unknown): Monaco.languages.Location[] {
-  const items = Array.isArray(result) ? result : result ? [result] : [];
+  const items = Array.isArray(result) ? result.slice(0, maxLspListItems) : result ? [result] : [];
   const locations: Monaco.languages.Location[] = [];
   for (const raw of items) {
     if (!raw || typeof raw !== "object") continue;

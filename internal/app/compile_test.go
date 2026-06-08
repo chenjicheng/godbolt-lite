@@ -84,6 +84,10 @@ func TestValidateCompilerArgsRejectsUnsafeInputs(t *testing.T) {
 		{"-fpass-plugin=evil.dll"},
 		{"-load-pass-plugin=evil.dll"},
 		{"-mllvm=-load"},
+		{"-Wl,@C:/tmp/args.rsp"},
+		{"-Wl,/map:C:/tmp/out.map"},
+		{"-Wa,-o,C:/tmp/out.obj"},
+		{"-Wp,-MD,C:/tmp/deps.d"},
 		{"-I", filepath.Join(outsideDir, "include")},
 		{"-fuse-ld", filepath.Join(outsideDir, "lld-link.exe")},
 		{"-fuse-ld=evil"},
@@ -113,6 +117,28 @@ func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
 	}
 	if err := compiler.validateCompilerArgs(args); err != nil {
 		t.Fatalf("validateCompilerArgs failed: %v", err)
+	}
+}
+
+func TestSanitizeCompilerArgsNormalizesRelativePathArgs(t *testing.T) {
+	projectDir := t.TempDir()
+	includeDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	vendorDir := filepath.Join(includeDir, "vendor")
+	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+
+	args, err := compiler.sanitizeCompilerArgs([]string{"-I", "vendor"})
+	if err != nil {
+		t.Fatalf("sanitizeCompilerArgs failed: %v", err)
+	}
+	if len(args) != 2 || args[0] != "-I" {
+		t.Fatalf("args = %#v, want normalized -I pair", args)
+	}
+	if !strings.EqualFold(args[1], vendorDir) {
+		t.Fatalf("-I path = %q, want %q", args[1], vendorDir)
 	}
 }
 
@@ -165,13 +191,16 @@ func TestRunSourcePathsFollowsIncludeFolderHeaderImplementations(t *testing.T) {
 	assertNotRunSource(t, paths, includeDir, "vendor/unused.c")
 }
 
-func TestRunArtifactNameSanitizesRequestID(t *testing.T) {
-	name := runArtifactName(`../bad path?$`, time.Unix(1, 2))
+func TestRunArtifactPrefixSanitizesRequestID(t *testing.T) {
+	name := runArtifactPrefix(`../bad path?$`, time.Unix(1, 2))
 	if strings.ContainsAny(name, `\/:?* "`) {
-		t.Fatalf("runArtifactName produced unsafe name %q", name)
+		t.Fatalf("runArtifactPrefix produced unsafe name %q", name)
 	}
 	if !strings.HasPrefix(name, "program-") {
 		t.Fatalf("runArtifactName = %q, want program-*", name)
+	}
+	if !strings.HasSuffix(name, "-") {
+		t.Fatalf("runArtifactPrefix = %q, want trailing dash for MkdirTemp", name)
 	}
 }
 

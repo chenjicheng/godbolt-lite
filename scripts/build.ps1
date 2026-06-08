@@ -7,12 +7,26 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+. (Join-Path $PSScriptRoot "path-guards.ps1")
 $embeddedToolchainZip = ".\internal\app\toolchains\llvm-windows-amd64.zip"
 $maxToolchainZipEntries = 20000
 $maxToolchainZipUncompressedBytes = 700MB
 
 if ($Release -and $SkipFrontend) {
     throw "Release build cannot use -SkipFrontend; the embedded UI must be rebuilt for release."
+}
+
+function Invoke-CheckedTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $output = & $FilePath @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE. $output"
+    }
 }
 
 function Assert-EmbeddedToolchainZip {
@@ -35,16 +49,7 @@ function Assert-EmbeddedToolchainZip {
         $uncompressedBytes = 0L
         $entryNames = @()
         foreach ($entry in $zip.Entries) {
-            $name = $entry.FullName.Replace("\", "/").TrimStart([char[]]@("/"))
-            if (
-                [string]::IsNullOrWhiteSpace($name) -or
-                $name.StartsWith("../") -or
-                $name.Contains("/../") -or
-                $name -match '^[A-Za-z]:' -or
-                $name.StartsWith("/")
-            ) {
-                throw "Embedded LLVM zip contains unsafe entry path '$($entry.FullName)'."
-            }
+            $name = ConvertTo-SafeArchiveEntryName $entry.FullName
             $uncompressedBytes += $entry.Length
             if ($uncompressedBytes -gt $maxToolchainZipUncompressedBytes) {
                 throw "Embedded LLVM zip expands beyond $maxToolchainZipUncompressedBytes bytes."
@@ -88,9 +93,7 @@ function Assert-ReleaseSmoke {
     $cacheDir = Join-Path $smokeRoot "cache"
     $stdoutPath = Join-Path $smokeRoot "stdout.log"
     $stderrPath = Join-Path $smokeRoot "stderr.log"
-    if (Test-Path $smokeRoot) {
-        Remove-Item -LiteralPath $smokeRoot -Recurse -Force
-    }
+    Remove-DirectoryInsideRoot -BaseDir $root -Path $smokeRoot
     New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
 
     $proc = Start-Process `
@@ -107,13 +110,47 @@ function Assert-ReleaseSmoke {
                 $stderr = if (Test-Path $stderrPath) { Get-Content -Raw $stderrPath } else { "" }
                 throw "Release smoke process exited early with code $($proc.ExitCode). $stderr"
             }
+            $status = $null
             try {
                 $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/status" -TimeoutSec 2
-                if ($status.ready -eq $true) {
-                    return
-                }
             } catch {
                 Start-Sleep -Milliseconds 300
+                continue
+            }
+            if ($status.ready -eq $true) {
+                $expectedRoot = Join-Path $cacheDir "toolchains\llvm-windows-amd64"
+                if (-not ([string]$status.toolchain).Contains($expectedRoot)) {
+                    throw "Release smoke did not use the embedded toolchain cache. Status toolchain: $($status.toolchain)"
+                }
+                Invoke-CheckedTool (Join-Path $expectedRoot "bin\clang.exe") @("--version")
+                Invoke-CheckedTool (Join-Path $expectedRoot "bin\clangd.exe") @("--version")
+                Invoke-CheckedTool (Join-Path $expectedRoot "bin\lld-link.exe") @("--version")
+
+                $probeDir = Join-Path $smokeRoot "probe"
+                New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+                $probeSource = Join-Path $probeDir "probe.c"
+                Set-Content -LiteralPath $probeSource -Encoding ASCII -Value "#include <stddef.h>`nint probe(void) { return sizeof(size_t) > 0; }"
+                Invoke-CheckedTool (Join-Path $expectedRoot "bin\clang.exe") @("-fsyntax-only", $probeSource)
+
+                $index = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -TimeoutSec 2 -UseBasicParsing
+                if ($index.StatusCode -ne 200 -or -not ([string]$index.Content).Contains('id="app"')) {
+                    throw "Release smoke did not serve the rebuilt web UI."
+                }
+                $compileBody = @{
+                    activeFile = "main.c"
+                    compilerArgs = "-Og -g0"
+                    requestId = "release-smoke"
+                } | ConvertTo-Json
+                $compileResult = Invoke-RestMethod `
+                    -Uri "http://127.0.0.1:$port/api/compile" `
+                    -Method Post `
+                    -ContentType "application/json" `
+                    -Body $compileBody `
+                    -TimeoutSec 10
+                if ($compileResult.ok -ne $true) {
+                    throw "Release smoke compile failed: $($compileResult.error) $($compileResult.stderr)"
+                }
+                return
             }
         } while ((Get-Date) -lt $deadline)
         throw "Release smoke did not report ready=true before timeout."
@@ -142,6 +179,9 @@ if (-not $SkipFrontend) {
             Pop-Location
         }
     } else {
+        if ($Release) {
+            throw "Release build requires web\package.json so the embedded UI can be rebuilt."
+        }
         Write-Warning "web/package.json not found; building with fallback embedded UI."
     }
 }
@@ -152,11 +192,12 @@ $env:TEMP = Join-Path $root ".tmp"
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:GOCACHE, $env:GOTMPDIR, $env:TEMP | Out-Null
 go test ./...
+if (-not (Test-Path ".\internal\app\static\index.html")) {
+    throw "internal\app\static\index.html is missing. Build the frontend first; -SkipFrontend is development-only."
+}
 New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
 go build -trimpath -ldflags="-s -w" -o ".\dist\mini-godbolt.exe" .\cmd\mini-godbolt
-if (Test-Path ".\dist\include") {
-    Remove-Item -LiteralPath ".\dist\include" -Recurse -Force
-}
+Remove-DirectoryInsideRoot -BaseDir $root -Path ".\dist\include"
 New-Item -ItemType Directory -Force -Path ".\dist\include" | Out-Null
 
 if (Test-Path ".\include") {

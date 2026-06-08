@@ -56,11 +56,14 @@ func TestIsLSPInitializeMessage(t *testing.T) {
 }
 
 func TestLSPAcceptOptionsRequiresLoopbackHost(t *testing.T) {
-	if _, err := lspAcceptOptions(&http.Request{Host: "127.0.0.1:57070"}); err != nil {
+	if _, err := lspAcceptOptions(&http.Request{Host: "127.0.0.1:57070", RemoteAddr: "127.0.0.1:50000"}); err != nil {
 		t.Fatalf("loopback host rejected: %v", err)
 	}
-	if _, err := lspAcceptOptions(&http.Request{Host: "example.com:57070"}); err == nil {
+	if _, err := lspAcceptOptions(&http.Request{Host: "example.com:57070", RemoteAddr: "127.0.0.1:50000"}); err == nil {
 		t.Fatal("non-loopback host accepted")
+	}
+	if _, err := lspAcceptOptions(&http.Request{Host: "127.0.0.1:57070", RemoteAddr: "192.0.2.4:50000"}); err == nil {
+		t.Fatal("non-loopback peer accepted")
 	}
 }
 

@@ -249,6 +249,9 @@ func lspAcceptOptions(r *http.Request) (*websocket.AcceptOptions, error) {
 	if !isLoopbackHost(r.Host) {
 		return nil, fmt.Errorf("LSP WebSocket host %q is not loopback", r.Host)
 	}
+	if !isLoopbackHost(r.RemoteAddr) {
+		return nil, fmt.Errorf("LSP WebSocket peer %q is not loopback", r.RemoteAddr)
+	}
 	return &websocket.AcceptOptions{
 		OriginPatterns: []string{"http://" + r.Host, "https://" + r.Host},
 	}, nil

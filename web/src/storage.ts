@@ -3,6 +3,12 @@ export type StoredOpenTabsState = {
   activeFile: string;
 };
 
+export interface DraftProjectState<TProject> {
+  savedAt: number;
+  project: TProject;
+  baseHash?: string;
+}
+
 export function readStoredFontScale(storageKey: string, clamp: (value: number) => number): number | undefined {
   try {
     const raw = localStorage.getItem(storageKey);
@@ -77,6 +83,41 @@ export function readStoredOpenTabs(storageKey: string): StoredOpenTabsState | un
 export function writeStoredOpenTabs(storageKey: string, state: StoredOpenTabsState): void {
   try {
     localStorage.setItem(storageKey, JSON.stringify(state));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+export function readStoredDraft<TProject>(storageKey: string): DraftProjectState<TProject> | undefined {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const record = parsed as Partial<DraftProjectState<TProject>>;
+    if (typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt) || !record.project) return undefined;
+    return {
+      savedAt: record.savedAt,
+      project: record.project,
+      baseHash: typeof record.baseHash === "string" ? record.baseHash : undefined
+    };
+  } catch {
+    // Ignore malformed or inaccessible storage and use the server state.
+  }
+  return undefined;
+}
+
+export function writeStoredDraft<TProject>(storageKey: string, project: TProject, baseHash: string): void {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify({ savedAt: Date.now(), project, baseHash }));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+export function clearStoredDraft(storageKey: string): void {
+  try {
+    localStorage.removeItem(storageKey);
   } catch {
     // localStorage can be unavailable in restricted browser contexts.
   }

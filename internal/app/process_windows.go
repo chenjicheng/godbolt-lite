@@ -61,13 +61,16 @@ func runCommand(ctx context.Context, cmd *exec.Cmd) error {
 	}
 
 	job := createKillOnCloseJob()
-	if job != 0 {
-		if err := assignProcessToJob(job, cmd.Process.Pid); err != nil {
-			closeHandle(job)
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			return err
-		}
+	if job == 0 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("failed to create Windows job object")
+	}
+	if err := assignProcessToJob(job, cmd.Process.Pid); err != nil {
+		closeHandle(job)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
 	}
 
 	done := make(chan error, 1)
@@ -77,14 +80,10 @@ func runCommand(ctx context.Context, cmd *exec.Cmd) error {
 
 	select {
 	case err := <-done:
-		if job != 0 {
-			closeHandle(job)
-		}
+		closeHandle(job)
 		return err
 	case <-ctx.Done():
-		if job != 0 {
-			closeHandle(job)
-		}
+		closeHandle(job)
 		_ = cmd.Process.Kill()
 		<-done
 		return ctx.Err()

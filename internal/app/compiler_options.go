@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -14,22 +15,38 @@ var (
 )
 
 func (c *Compiler) validateCompilerArgs(args []string) error {
+	_, err := c.sanitizeCompilerArgs(args)
+	return err
+}
+
+func (c *Compiler) compilerArgsFromString(value string) ([]string, error) {
+	args, err := splitCompilerArgs(defaultIfEmpty(value, defaultCompilerArgs))
+	if err != nil {
+		return nil, err
+	}
+	return c.sanitizeCompilerArgs(args)
+}
+
+func (c *Compiler) sanitizeCompilerArgs(args []string) ([]string, error) {
+	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "" {
 			continue
 		}
 		if strings.HasPrefix(arg, "@") {
-			return fmt.Errorf("response files are not allowed in compiler arguments: %s", arg)
+			return nil, fmt.Errorf("response files are not allowed in compiler arguments: %s", arg)
 		}
 		if arg == "--" {
-			return errors.New("positional compiler inputs are not allowed")
+			return nil, errors.New("positional compiler inputs are not allowed")
 		}
 
 		if flag, value, consumed, ok := compilerPathFlagValue(args, i); ok {
-			if err := c.validateCompilerArgPath(flag, value); err != nil {
-				return err
+			normalized, err := c.normalizeCompilerArgPath(flag, value)
+			if err != nil {
+				return nil, err
 			}
+			out = append(out, flag, normalized)
 			if consumed {
 				i++
 			}
@@ -38,7 +55,11 @@ func (c *Compiler) validateCompilerArgs(args []string) error {
 
 		if flag, value, consumed, ok := compilerValueFlag(args, i); ok {
 			if err := validateCompilerFlagValue(flag, value); err != nil {
-				return err
+				return nil, err
+			}
+			out = append(out, arg)
+			if consumed {
+				out = append(out, value)
 			}
 			if consumed {
 				i++
@@ -47,15 +68,16 @@ func (c *Compiler) validateCompilerArgs(args []string) error {
 		}
 
 		if isAllowedCompilerSwitch(arg) {
+			out = append(out, arg)
 			continue
 		}
 
 		if !strings.HasPrefix(arg, "-") {
-			return fmt.Errorf("positional compiler input %q is not allowed; add project files through the file list", arg)
+			return nil, fmt.Errorf("positional compiler input %q is not allowed; add project files through the file list", arg)
 		}
-		return fmt.Errorf("compiler argument %s is not allowed here", arg)
+		return nil, fmt.Errorf("compiler argument %s is not allowed here", arg)
 	}
-	return nil
+	return out, nil
 }
 
 func compilerPathFlagValue(args []string, index int) (flag, value string, consumed bool, ok bool) {
@@ -157,6 +179,9 @@ func isAllowedCompilerSwitch(arg string) bool {
 		return true
 	}
 	if strings.HasPrefix(arg, "-W") {
+		if strings.HasPrefix(arg, "-Wl,") || strings.HasPrefix(arg, "-Wa,") || strings.HasPrefix(arg, "-Wp,") || strings.Contains(arg, "@") {
+			return false
+		}
 		return safeCompilerValueRE.MatchString(arg)
 	}
 	if strings.HasPrefix(arg, "-mllvm") {
@@ -168,36 +193,51 @@ func isAllowedCompilerSwitch(arg string) bool {
 	return false
 }
 
-func (c *Compiler) validateCompilerArgPath(flag, value string) error {
+func (c *Compiler) normalizeCompilerArgPath(flag, value string) (string, error) {
 	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("%s requires a path", flag)
+		return "", fmt.Errorf("%s requires a path", flag)
 	}
 	if strings.HasPrefix(value, "@") {
-		return fmt.Errorf("response-file path %q is not allowed", value)
+		return "", fmt.Errorf("response-file path %q is not allowed", value)
 	}
 
-	var candidates []string
+	var candidates []compilerArgPathCandidate
 	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
-		candidates = []string{value}
+		candidates = []compilerArgPathCandidate{{path: value}}
 	} else {
+		rel := filepath.FromSlash(strings.ReplaceAll(value, "\\", "/"))
 		for _, root := range c.allowedCompilerArgRoots() {
 			if root != "" {
-				candidates = append(candidates, filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(value, "\\", "/"))))
+				candidates = append(candidates, compilerArgPathCandidate{path: filepath.Join(root, rel)})
 			}
 		}
 	}
 
+	var fallback string
 	for _, candidate := range candidates {
 		for _, root := range c.allowedCompilerArgRoots() {
 			if root == "" {
 				continue
 			}
-			if err := ensurePathInside(root, candidate); err == nil {
-				return nil
+			if err := ensurePathInside(root, candidate.path); err == nil {
+				abs := absPath(candidate.path)
+				if fallback == "" {
+					fallback = abs
+				}
+				if fileExists(candidate.path) || directoryExists(candidate.path) {
+					return abs, nil
+				}
 			}
 		}
 	}
-	return fmt.Errorf("%s path %q must stay inside the project, include, or system include folders", flag, value)
+	if fallback != "" {
+		return fallback, nil
+	}
+	return "", fmt.Errorf("%s path %q must stay inside the project, include, or system include folders", flag, value)
+}
+
+type compilerArgPathCandidate struct {
+	path string
 }
 
 func (c *Compiler) allowedCompilerArgRoots() []string {
@@ -206,6 +246,11 @@ func (c *Compiler) allowedCompilerArgRoots() []string {
 
 func looksLikePath(value string) bool {
 	return filepath.IsAbs(value) || filepath.VolumeName(value) != "" || strings.HasPrefix(value, ".") || strings.ContainsAny(value, `/\`)
+}
+
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func dependencyCompilerArgs(args []string) []string {

@@ -17,6 +17,7 @@ import {
   consoleHeightStorageKey,
   consoleVisibleStorageKey,
   defaultCompilerArgs,
+  draftProjectStorageKey,
   filesVisibleStorageKey,
   fontScaleStep,
   layoutResizerWidth,
@@ -29,6 +30,7 @@ import {
   linuxDefaultCompilerArgs,
   malformedLinuxDefaultCompilerArgs,
   maxFontScale,
+  maxPersistedDraftAgeMs,
   minAsmWidth,
   minAssemblyTextHeight,
   minBottomPanelHeight,
@@ -41,12 +43,19 @@ import {
   windowsDefaultCompilerArgs
 } from "./config";
 import { attachLspClient, type LspHandle } from "./lspClient";
+import { createModalController } from "./modal";
+import { normalizeProjectPath, pathsEqual, validateEditableSourcePath } from "./projectPaths";
+import { cloneProject, isProjectStateLike, projectFingerprint } from "./projectState";
+import { formatRunOutput } from "./runOutput";
 import {
+  clearStoredDraft,
+  readStoredDraft,
   readStoredBoolean,
   readStoredFontScale,
   readStoredOpenTabs,
   readStoredPixels,
   writeStoredBoolean,
+  writeStoredDraft,
   writeStoredOpenTabs,
   writeStoredPixels
 } from "./storage";
@@ -92,12 +101,17 @@ const asmRawEl = must<HTMLButtonElement>("#asm-raw");
 const fileMenuEl = must<HTMLDivElement>("#file-menu");
 const fileMenuRenameEl = must<HTMLButtonElement>("#file-menu-rename");
 const fileMenuDeleteEl = must<HTMLButtonElement>("#file-menu-delete");
-const modalBackdropEl = must<HTMLDivElement>("#modal-backdrop");
-const modalTitleEl = must<HTMLDivElement>("#modal-title");
-const modalMessageEl = must<HTMLDivElement>("#modal-message");
-const modalInputEl = must<HTMLInputElement>("#modal-input");
-const modalCancelEl = must<HTMLButtonElement>("#modal-cancel");
-const modalConfirmEl = must<HTMLButtonElement>("#modal-confirm");
+const modal = createModalController(
+  {
+    backdrop: must<HTMLDivElement>("#modal-backdrop"),
+    title: must<HTMLDivElement>("#modal-title"),
+    message: must<HTMLDivElement>("#modal-message"),
+    input: must<HTMLInputElement>("#modal-input"),
+    cancel: must<HTMLButtonElement>("#modal-cancel"),
+    confirm: must<HTMLButtonElement>("#modal-confirm")
+  },
+  { beforeOpen: hideFileMenu }
+);
 
 let codeFontScale = readInitialCodeFontScale();
 let sidebarWidth = readStoredPixels(sidebarWidthStorageKey, minSidebarWidth);
@@ -138,6 +152,7 @@ let compileTimer: number | undefined;
 let syncTimer: number | undefined;
 let syncVersion = 0;
 let syncQueue: Promise<void> = Promise.resolve();
+let lastSyncedProjectHash = "";
 let toolRunRevision = 0;
 let latestCompileId = "";
 let latestRunId = "";
@@ -150,13 +165,8 @@ let latestAsm = "";
 let latestDiagnostics = "";
 let latestRunOutput = "";
 let asmView: "csapp" | "raw" = "csapp";
-let activeModal: ModalState | null = null;
 let activeLayoutResize: LayoutResizeState | null = null;
 let editorLayoutFrame: number | undefined;
-
-type ModalState =
-  | { kind: "prompt"; resolve: (value: string | undefined) => void; restoreFocus: HTMLElement | null }
-  | { kind: "confirm"; resolve: (value: boolean) => void; restoreFocus: HTMLElement | null };
 
 type LayoutResizeKind = "sidebar" | "asm" | "console";
 
@@ -178,7 +188,9 @@ void boot();
 async function boot(): Promise<void> {
   try {
     const [status, loaded] = await Promise.all([fetchStatus(), fetchProject()]);
-    project = loaded;
+    lastSyncedProjectHash = projectFingerprint(loaded);
+    const restoredDraft = draftProjectFromStorage(loaded);
+    project = restoredDraft ?? loaded;
     project.compilerArgs =
       !project.compilerArgs ||
       project.compilerArgs === legacyDefaultCompilerArgs ||
@@ -193,6 +205,7 @@ async function boot(): Promise<void> {
     renderMeta(status);
     renderFiles();
     restoreOpenTabs(project.activeFile || project.files[0]?.path || "main.c");
+    if (restoredDraft) scheduleSync();
     if (status.ready) {
       lsp = attachLspClient({
         monaco,
@@ -299,9 +312,9 @@ window.addEventListener("contextmenu", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (activeModal && !modalBackdropEl.contains(event.target as Node)) {
+  if (modal.isActive() && !modal.contains(event.target as Node)) {
     event.preventDefault();
-    focusModalDefault();
+    modal.focusDefault();
     return;
   }
   if (event.key === "Escape") {
@@ -326,37 +339,6 @@ window.addEventListener("keydown", (event) => {
 });
 
 filesEl.addEventListener("scroll", () => hideFileMenu());
-
-modalCancelEl.addEventListener("click", () => closeModal(false));
-modalConfirmEl.addEventListener("click", () => closeModal(true));
-modalBackdropEl.addEventListener("click", (event) => {
-  if (event.target === modalBackdropEl) closeModal(false);
-});
-modalBackdropEl.addEventListener("keydown", (event) => {
-  if (event.key === "Tab") {
-    trapModalFocus(event);
-    return;
-  }
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeModal(false);
-  }
-  if (
-    event.key === "Enter" &&
-    activeModal?.kind === "prompt" &&
-    !event.isComposing &&
-    event.target === modalInputEl
-  ) {
-    event.preventDefault();
-    closeModal(true);
-  }
-});
-
-window.addEventListener("focusin", (event) => {
-  if (activeModal && !modalBackdropEl.contains(event.target as Node)) {
-    focusModalDefault();
-  }
-});
 
 function openFile(path: string): void {
   const file = project.files.find((item) => item.path === path) ?? readOnlyFiles.get(path);
@@ -472,9 +454,11 @@ function restoreOpenTabs(fallbackPath: string): void {
 
 function persistOpenTabs(): void {
   pruneOpenTabs();
+  const editableTabs = openTabs.filter((path) => sourcePathExists(path) && !readOnlyFiles.has(path));
+  const activePath = activeEditorPath();
   writeStoredOpenTabs(openTabsStorageKey, {
-    openTabs: openTabs.filter((path) => sourcePathExists(path)),
-    activeFile: activeEditorPath()
+    openTabs: editableTabs,
+    activeFile: readOnlyFiles.has(activePath) ? project.activeFile : activePath
   });
 }
 
@@ -642,88 +626,6 @@ function hideFileMenu(restoreFocus = false): void {
   if (restoreFocus) invoker?.focus();
 }
 
-function showConfirm(
-  title: string,
-  message: string,
-  confirmText: string,
-  danger = false,
-  restoreFocus = focusedElement()
-): Promise<boolean> {
-  closeModal(false);
-  return new Promise((resolve) => {
-    activeModal = { kind: "confirm", resolve, restoreFocus };
-    openModal(title, message, confirmText, danger, false);
-    danger ? modalCancelEl.focus() : modalConfirmEl.focus();
-  });
-}
-
-function openModal(title: string, message: string, confirmText: string, danger: boolean, showInput: boolean): void {
-  hideFileMenu();
-  modalTitleEl.textContent = title;
-  modalMessageEl.textContent = message;
-  modalMessageEl.hidden = !message;
-  modalInputEl.setAttribute("aria-label", title);
-  modalInputEl.hidden = !showInput;
-  modalConfirmEl.textContent = confirmText;
-  modalConfirmEl.classList.toggle("danger", danger);
-  modalBackdropEl.hidden = false;
-}
-
-function closeModal(confirmed: boolean): void {
-  if (!activeModal) return;
-
-  const modal = activeModal;
-  const value = modalInputEl.value;
-  activeModal = null;
-  modalBackdropEl.hidden = true;
-  modalInputEl.value = "";
-  modalConfirmEl.classList.remove("danger");
-  modal.restoreFocus?.focus();
-
-  if (modal.kind === "prompt") {
-    modal.resolve(confirmed ? value : undefined);
-  } else {
-    modal.resolve(confirmed);
-  }
-}
-
-function focusedElement(): HTMLElement | null {
-  return document.activeElement instanceof HTMLElement ? document.activeElement : null;
-}
-
-function focusableModalControls(): HTMLElement[] {
-  return [modalInputEl, modalCancelEl, modalConfirmEl].filter((el) => !el.hidden);
-}
-
-function focusModalDefault(): void {
-  if (!activeModal) return;
-  if (activeModal.kind === "prompt") {
-    modalInputEl.focus();
-  } else {
-    modalCancelEl.focus();
-  }
-}
-
-function trapModalFocus(event: KeyboardEvent): void {
-  const controls = focusableModalControls();
-  if (!controls.length) return;
-
-  const first = controls[0];
-  const last = controls[controls.length - 1];
-  const active = document.activeElement;
-  if (event.shiftKey) {
-    if (active === first || !modalBackdropEl.contains(active)) {
-      event.preventDefault();
-      last.focus();
-    }
-    return;
-  }
-  if (active === last || !modalBackdropEl.contains(active)) {
-    event.preventDefault();
-    first.focus();
-  }
-}
-
 function renderTabs(): void {
   pruneOpenTabs();
   tabsEl.innerHTML = "";
@@ -848,7 +750,7 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
     setDiagnostics("Keep at least one project file.");
     return;
   }
-  const confirmed = await showConfirm("Delete file", `Delete ${path}?`, "Delete", true, restoreFocus ?? focusedElement());
+  const confirmed = await modal.showConfirm("Delete file", `Delete ${path}?`, "Delete", true, restoreFocus ?? modal.focusedElement());
   if (!confirmed) return;
 
   const index = project.files.findIndex((file) => file.path === path);
@@ -861,6 +763,7 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
   }
 
   const model = models.get(path);
+  const wasActive = Boolean(model && activeModel === model) || pathsEqual(path, activeEditorPath());
   try {
     statusEl.textContent = "Saving";
     await persistProjectNow(nextProject);
@@ -877,7 +780,7 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
   }
   removeOpenTabPath(path);
 
-  if (activeModel === model || path === project.activeFile) {
+  if (wasActive) {
     const next = project.files.find((file) => file.path === project.activeFile) ?? project.files[0];
     activeModel = null;
     openFile(next.path);
@@ -891,6 +794,7 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
 }
 
 function scheduleSync(): void {
+  persistProjectDraft();
   window.clearTimeout(syncTimer);
   const version = nextSyncVersion();
   syncTimer = window.setTimeout(() => {
@@ -903,6 +807,7 @@ function scheduleSync(): void {
 
 function scheduleCompile(): void {
   invalidateToolRuns();
+  clearTransientOutputs("Compiling...");
   window.clearTimeout(compileTimer);
   compileTimer = window.setTimeout(() => {
     void runCompile(toolRunRevision);
@@ -913,6 +818,7 @@ async function runCompile(revision = toolRunRevision): Promise<void> {
   window.clearTimeout(compileTimer);
   compileTimer = undefined;
   if (!project.activeFile.endsWith(".c")) {
+    clearTransientOutputs("");
     statusEl.textContent = "Open a .c file to compile";
     return;
   }
@@ -960,6 +866,7 @@ async function executeProgram(
   revision = toolRunRevision
 ): Promise<void> {
   if (!snapshot.activeFile.endsWith(".c")) {
+    setRunOutput("");
     statusEl.textContent = "Open a .c file to run";
     return;
   }
@@ -1010,6 +917,23 @@ function projectSnapshotForToolRun(): ProjectState {
   return cloneProject(project);
 }
 
+function persistProjectDraft(): void {
+  writeStoredDraft(draftProjectStorageKey, projectSnapshotForToolRun(), lastSyncedProjectHash);
+}
+
+function draftProjectFromStorage(serverProject: ProjectState): ProjectState | undefined {
+  const draft = readStoredDraft<ProjectState>(draftProjectStorageKey);
+  if (!draft || Date.now() - draft.savedAt > maxPersistedDraftAgeMs) {
+    clearStoredDraft(draftProjectStorageKey);
+    return undefined;
+  }
+  if (!isProjectStateLike(draft.project) || draft.baseHash !== projectFingerprint(serverProject)) {
+    clearStoredDraft(draftProjectStorageKey);
+    return undefined;
+  }
+  return cloneProject(draft.project);
+}
+
 function nextSyncVersion(): number {
   syncVersion += 1;
   return syncVersion;
@@ -1035,7 +959,11 @@ function queueProjectSync(snapshot: ProjectState, version: number): Promise<Proj
     .catch(() => undefined)
     .then(() => syncProject(snapshot))
     .then((saved) => {
-      if (version === syncVersion) project = saved;
+      if (version === syncVersion) {
+        project = saved;
+        lastSyncedProjectHash = projectFingerprint(saved);
+        clearStoredDraft(draftProjectStorageKey);
+      }
       return saved;
     });
   syncQueue = task.then(
@@ -1059,6 +987,14 @@ function renderCompile(result: CompileResponse): void {
   statusEl.textContent = result.ok ? `Compiled in ${result.durationMs}ms` : `Compile failed (${result.exitCode})`;
 }
 
+function clearTransientOutputs(asmText: string): void {
+  latestAsm = asmText;
+  latestDiagnostics = "";
+  latestRunOutput = "";
+  renderAssembly();
+  renderConsole();
+}
+
 function renderRun(result: RunResponse): void {
   setRunOutput(formatRunOutput(result));
   statusEl.textContent = result.ok
@@ -1078,15 +1014,6 @@ function updateArgsPresetButtons(): void {
   const value = compilerArgsEl.value.trim();
   argsWindowsEl.classList.toggle("active", value === windowsDefaultCompilerArgs);
   argsCsappEl.classList.toggle("active", value === linuxDefaultCompilerArgs);
-}
-
-function formatRunOutput(result: RunResponse): string {
-  const sections = [result.note, result.error, result.stdout].filter(Boolean) as string[];
-  if (result.stderr) {
-    sections.push(result.stdout ? `stderr:\n${result.stderr}` : result.stderr);
-  }
-  sections.push(`[exit code: ${result.exitCode}]`);
-  return sections.join("\n\n");
 }
 
 function setDiagnostics(text: string): void {
@@ -1115,10 +1042,9 @@ function renderAssembly(): void {
 
 function handleFontZoomWheel(event: WheelEvent): void {
   if (!event.ctrlKey && !event.metaKey) return;
-  event.preventDefault();
-
   if (!isCodeFontZoomTarget(event.target)) return;
 
+  event.preventDefault();
   event.stopPropagation();
   const direction = event.deltaY < 0 ? 1 : -1;
   setCodeFontScale(codeFontScale + direction * fontScaleStep);
@@ -1423,8 +1349,20 @@ async function jumpToDefinition(model: monaco.editor.ITextModel, position: monac
       if (source.readOnly) {
         readOnlyFiles.set(path, { path, content: source.content });
         readOnlyByUri.set(targetUri, path);
-      } else if (!project.files.some((file) => file.path === path)) {
-        project.files.push({ path, content: source.content });
+      } else {
+        const normalizedPath = normalizeProjectPath(path);
+        const validationError = validateEditableSourcePath(normalizedPath);
+        if (validationError) {
+          setDiagnostics(validationError);
+          return;
+        }
+        const existing = project.files.find((file) => pathsEqual(file.path, normalizedPath));
+        if (existing) {
+          path = existing.path;
+        } else {
+          project.files.push({ path: normalizedPath, content: source.content });
+          path = normalizedPath;
+        }
       }
     }
     openFile(path);
@@ -1451,31 +1389,11 @@ function pathFromProjectUri(uri: string): string | undefined {
     .split("/")
     .map((part) => decodeURIComponent(part))
     .join("/");
-  return project.files.some((file) => file.path === path) ? path : undefined;
+  return project.files.find((file) => pathsEqual(file.path, path))?.path;
 }
 
 function pathToFileUri(path: string): string {
   return monaco.Uri.file(path).toString();
-}
-
-function normalizeProjectPath(path: string): string {
-  return path.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
-}
-
-function validateEditableSourcePath(path: string): string | undefined {
-  if (!path) return "File name is required.";
-  if (path.startsWith("/") || /^[A-Za-z]:/.test(path)) return "Absolute paths are not allowed.";
-  if (path === "external" || path.startsWith("external/")) return "The external/ namespace is reserved for read-only includes.";
-  if (!path.endsWith(".c") && !path.endsWith(".h")) return "File name must end with .c or .h.";
-  if (/[<>:"|?*]/.test(path)) return "File name contains characters Windows cannot store.";
-
-  const reserved = new Set(["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]);
-  for (const part of path.split("/")) {
-    if (!part || part === "." || part === "..") return "Path segments must be normal file or folder names.";
-    const stem = part.split(".")[0].toUpperCase();
-    if (reserved.has(stem)) return `${part} is a reserved Windows file name.`;
-  }
-  return undefined;
 }
 
 function shortcutTargetPath(target: EventTarget | null): string {
@@ -1483,7 +1401,7 @@ function shortcutTargetPath(target: EventTarget | null): string {
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
     return "";
   }
-  if (!modalBackdropEl.hidden && modalBackdropEl.contains(target)) return "";
+  if (modal.isActive() && modal.contains(target)) return "";
   if (!fileMenuEl.hidden && fileMenuEl.contains(target)) return "";
 
   const fileButton = target.closest<HTMLButtonElement>(".file");
@@ -1491,18 +1409,6 @@ function shortcutTargetPath(target: EventTarget | null): string {
   if (target.closest(".editor")) return activeEditorPath() || project.activeFile;
   if (target === document.body) return activeEditorPath() || project.activeFile;
   return "";
-}
-
-function pathsEqual(left: string, right: string): boolean {
-  return left.localeCompare(right, undefined, { sensitivity: "accent" }) === 0;
-}
-
-function cloneProject(state: ProjectState): ProjectState {
-  return {
-    activeFile: state.activeFile,
-    compilerArgs: state.compilerArgs,
-    files: state.files.map((file) => ({ path: file.path, content: file.content }))
-  };
 }
 
 window.addEventListener("beforeunload", () => {

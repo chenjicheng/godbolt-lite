@@ -74,8 +74,11 @@ Important backend endpoints:
      - `go test ./...`
    - Frontend checks:
      - `npm.cmd run build` from `web`
-   - Full production check:
+   - Full development production check:
      - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1`
+   - Full release check:
+     - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Release`
+     - Release mode must run without `dist\toolchain`; move that sidecar aside first if it exists.
    - Runtime status check:
      - Start `dist\mini-godbolt.exe -addr 127.0.0.1:57070 -no-browser`
      - Query `GET http://127.0.0.1:57070/api/status`
@@ -86,8 +89,9 @@ Important backend endpoints:
 5. Release Pipeline
    - Run `scripts/fetch-llvm.ps1` when preparing a release toolchain.
    - Confirm `internal/app/toolchains/llvm-windows-amd64.zip` exists before a true single-exe release build.
-   - Run `scripts/build.ps1`.
-   - Confirm `dist/mini-godbolt.exe` starts without requiring LLVM on `PATH`.
+   - Move `dist\toolchain` aside before `scripts/build.ps1 -Release`; release validation rejects sidecar toolchains so embedded LLVM cannot be masked.
+   - Run `scripts/build.ps1 -Release`.
+   - Confirm the release smoke test uses the embedded cache toolchain, starts `clang.exe`, `clangd.exe`, and `lld-link.exe`, serves the rebuilt UI, verifies clang resource headers, and compiles the default project.
    - Confirm `dist/include` contains any intended third-party files copied from root `include/`.
 
 6. Git Hygiene

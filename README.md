@@ -31,3 +31,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch-llvm.ps1
 ```
 
 This creates both `dist/toolchain` for sidecar testing and `internal/app/toolchains/llvm-windows-amd64.zip` for single-exe embedding. The embedded zip must contain `bin/clang.exe`, `bin/clangd.exe`, `bin/lld-link.exe`, and the clang resource headers.
+
+For a release build:
+
+```powershell
+if (Test-Path .\dist\toolchain) { Move-Item .\dist\toolchain .\.tmp\release-toolchain-backup }
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Release
+if (Test-Path .\.tmp\release-toolchain-backup) { Move-Item .\.tmp\release-toolchain-backup .\dist\toolchain }
+```
+
+Release mode rebuilds the web UI, validates the embedded LLVM zip, rejects a masking `dist/toolchain` sidecar, starts the generated exe, confirms it uses the embedded cache toolchain rather than `PATH`, starts `clang.exe`, `clangd.exe`, and `lld-link.exe`, verifies clang resource headers with `<stddef.h>`, serves the rebuilt UI, and compiles the default project once.

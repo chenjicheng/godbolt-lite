@@ -83,13 +83,8 @@ func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileRespo
 		return resp
 	}
 
-	compilerArgs, err := splitCompilerArgs(defaultIfEmpty(req.CompilerArgs, defaultCompilerArgs))
+	compilerArgs, err := c.compilerArgsFromString(req.CompilerArgs)
 	if err != nil {
-		resp.Error = err.Error()
-		resp.DurationMs = time.Since(start).Milliseconds()
-		return resp
-	}
-	if err := c.validateCompilerArgs(compilerArgs); err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
@@ -103,6 +98,7 @@ func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileRespo
 	args = append(args, "-S", "-o", "-", sourcePath)
 
 	cmd := exec.CommandContext(ctx, c.clang, args...)
+	cmd.Dir = absPath(c.projectDir)
 	cmd.Env = c.commandEnv()
 	var stdout, stderr limitedBuffer
 	stdout.limit = 4 << 20
@@ -163,7 +159,8 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
-	if err := c.validateCompilerArgs(compilerArgs); err != nil {
+	compilerArgs, err = c.sanitizeCompilerArgs(compilerArgs)
+	if err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
@@ -183,18 +180,23 @@ func (c *Compiler) Run(ctx context.Context, req RunRequest) RunResponse {
 	}
 
 	runRoot := filepath.Join(absPath(c.projectDir), ".mini-godbolt-run")
-	runDir := filepath.Join(runRoot, runArtifactName(req.RequestID, start))
 	if err := ensurePathInside(c.projectDir, runRoot); err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
-	if err := ensurePathInside(runRoot, runDir); err != nil {
+	if err := os.MkdirAll(runRoot, 0o755); err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	runDir, err := os.MkdirTemp(runRoot, runArtifactPrefix(req.RequestID, start))
+	if err != nil {
+		resp.Error = err.Error()
+		resp.DurationMs = time.Since(start).Milliseconds()
+		return resp
+	}
+	if err := ensurePathInside(runRoot, runDir); err != nil {
 		resp.Error = err.Error()
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
