@@ -62,7 +62,7 @@ func NewCompiler(clang, projectDir, systemIncludeDir string) *Compiler {
 			lldLink = found
 		}
 	}
-	return &Compiler{clang: clang, lldLink: lldLink, projectDir: projectDir, systemIncludeDir: systemIncludeDir}
+	return &Compiler{clang: clang, lldLink: lldLink, projectDir: absPathIfSet(projectDir), systemIncludeDir: absPathIfSet(systemIncludeDir)}
 }
 
 func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileResponse {
@@ -298,7 +298,7 @@ func (c *Compiler) baseCompileArgs() []string {
 		"-x", "c",
 		"-std=c17",
 		"-isystem", absPath(c.systemIncludeDir),
-		"-I", absPath(c.projectDir),
+		"-I", ".",
 	}
 }
 
@@ -308,6 +308,13 @@ func absPath(path string) string {
 		return path
 	}
 	return abs
+}
+
+func absPathIfSet(path string) string {
+	if path == "" {
+		return ""
+	}
+	return absPath(path)
 }
 
 func (c *Compiler) commandEnv() []string {

@@ -22,7 +22,7 @@ C17 standard-library header stubs are embedded in the executable and extracted t
 %LOCALAPPDATA%\mini-godbolt\system-include\c17
 ```
 
-The project compile commands include that directory with `-isystem`, so clangd can complete standard headers and understand common libc declarations.
+The project compile commands include that directory with `-isystem`, so clangd can complete standard headers and understand common libc declarations. Project-local headers are referenced with `-I .` from the project working directory instead of an absolute project path.
 
 Third-party headers and source files are normal project files. Vendor folders must be created under the browser-managed project tree; the executable does not scan an `include/` sidecar directory.
 

@@ -41,7 +41,7 @@ type ProjectStore struct {
 }
 
 func NewProjectStore(dir, systemIncludeDir, clangPath string) *ProjectStore {
-	return &ProjectStore{dir: dir, systemIncludeDir: systemIncludeDir, clangPath: clangPath}
+	return &ProjectStore{dir: absPathIfSet(dir), systemIncludeDir: absPathIfSet(systemIncludeDir), clangPath: clangPath}
 }
 
 func (p *ProjectStore) Load() (ProjectState, error) {
@@ -217,7 +217,7 @@ func (p *ProjectStore) compileCommandFor(absFile string, compilerArgs []string) 
 		"-x", "c",
 		"-std=c17",
 		"-isystem", p.systemIncludeDir,
-		"-I", p.dir,
+		"-I", ".",
 	}
 	args = append(args, compilerArgs...)
 	args = append(args,

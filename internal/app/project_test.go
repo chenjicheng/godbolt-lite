@@ -58,8 +58,69 @@ func TestProjectStoreSyncWritesFilesAndCompileCommands(t *testing.T) {
 		!strings.Contains(text, systemIncludeDir) {
 		t.Fatalf("compile_commands.json missing expected entries: %s", text)
 	}
+	for _, command := range commands {
+		if command.Directory != dir {
+			t.Fatalf("compile command directory = %q, want project root %q", command.Directory, dir)
+		}
+		if !strings.Contains(command.Command, "-I .") {
+			t.Fatalf("compile command should use relative project include: %s", command.Command)
+		}
+		if strings.Contains(command.Command, "-I "+dir) || strings.Contains(command.Command, "-I \""+dir+"\"") {
+			t.Fatalf("compile command contains absolute project include: %s", command.Command)
+		}
+	}
 	if strings.Contains(text, "vendor") {
 		t.Fatalf("compile_commands.json included non-project vendor entries: %s", text)
+	}
+}
+
+func TestProjectStoreNormalizesRelativeProjectDirForCompileCommands(t *testing.T) {
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+
+	store := NewProjectStore("relative-project", "system-include", "clang")
+	state := ProjectState{
+		ActiveFile: "main.c",
+		Files: []ProjectFile{
+			{Path: "main.c", Content: "#include \"local.h\"\nint main(void){return 0;}"},
+			{Path: "local.h", Content: "int value(void);\n"},
+		},
+	}
+
+	if err := store.Sync(state); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	projectDir := filepath.Join(workDir, "relative-project")
+	data, err := os.ReadFile(filepath.Join(projectDir, "compile_commands.json"))
+	if err != nil {
+		t.Fatalf("compile_commands.json not written: %v", err)
+	}
+	var commands []commandEntry
+	if err := json.Unmarshal(data, &commands); err != nil {
+		t.Fatalf("compile_commands.json invalid: %v", err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("compile command count = %d, want 1", len(commands))
+	}
+	if commands[0].Directory != projectDir {
+		t.Fatalf("compile command directory = %q, want %q", commands[0].Directory, projectDir)
+	}
+	if !strings.Contains(commands[0].Command, "-I .") {
+		t.Fatalf("compile command should use relative project include: %s", commands[0].Command)
+	}
+	if strings.Contains(commands[0].Command, "-I "+projectDir) || strings.Contains(commands[0].Command, "-I \""+projectDir+"\"") {
+		t.Fatalf("compile command contains absolute project include: %s", commands[0].Command)
 	}
 }
 

@@ -39,12 +39,8 @@ export function mountAppShell(app: HTMLDivElement): void {
               </button>
             </div>
           </div>
-          <div class="explorer-section open-editors-section">
-            <div class="explorer-section-title">OPEN EDITORS</div>
-            <div id="open-editors" class="open-editors"></div>
-          </div>
           <div class="explorer-section project-section">
-            <div class="explorer-section-title">PROJECT</div>
+            <div id="project-root-drop" class="explorer-section-title project-root-drop-target">PROJECT</div>
             <vscode-tree id="files" class="file-tree" aria-label="Project files"></vscode-tree>
           </div>
         </aside>

@@ -50,7 +50,6 @@ input[type="checkbox"] {
 }
 
 .file-tree,
-.open-editors,
 .asm-output,
 .console-output {
   scrollbar-width: thin;
@@ -58,7 +57,6 @@ input[type="checkbox"] {
 }
 
 .file-tree::-webkit-scrollbar,
-.open-editors::-webkit-scrollbar,
 .asm-output::-webkit-scrollbar,
 .console-output::-webkit-scrollbar {
   width: var(--scrollbar-size);
@@ -66,14 +64,12 @@ input[type="checkbox"] {
 }
 
 .file-tree::-webkit-scrollbar-track,
-.open-editors::-webkit-scrollbar-track,
 .asm-output::-webkit-scrollbar-track,
 .console-output::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .file-tree::-webkit-scrollbar-thumb,
-.open-editors::-webkit-scrollbar-thumb,
 .asm-output::-webkit-scrollbar-thumb,
 .console-output::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
@@ -83,7 +79,6 @@ input[type="checkbox"] {
 }
 
 .file-tree::-webkit-scrollbar-thumb:hover,
-.open-editors::-webkit-scrollbar-thumb:hover,
 .asm-output::-webkit-scrollbar-thumb:hover,
 .console-output::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
@@ -91,7 +86,6 @@ input[type="checkbox"] {
 }
 
 .file-tree::-webkit-scrollbar-corner,
-.open-editors::-webkit-scrollbar-corner,
 .asm-output::-webkit-scrollbar-corner,
 .console-output::-webkit-scrollbar-corner {
   background: transparent;
@@ -236,7 +230,7 @@ input[type="checkbox"] {
 .sidebar {
   grid-column: 1;
   display: grid;
-  grid-template-rows: 34px auto minmax(0, 1fr);
+  grid-template-rows: 34px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: #171b20;
@@ -402,10 +396,6 @@ body.resizing-layout-row .shell::after {
   min-height: 0;
 }
 
-.open-editors-section {
-  border-bottom: 1px solid #303843;
-}
-
 .project-section {
   display: grid;
   grid-template-rows: 28px minmax(0, 1fr);
@@ -422,89 +412,17 @@ body.resizing-layout-row .shell::after {
   letter-spacing: 0;
 }
 
-.open-editors {
-  max-height: 30vh;
-  overflow: auto;
-  padding-bottom: 4px;
-}
-
-.open-editor-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
-  align-items: center;
-  height: 28px;
-  color: #c9d3df;
-}
-
-.open-editor-row:hover {
-  background: #2a2d2e;
-}
-
-.open-editor-row.active {
-  background: #37373d;
+.project-root-drop-target.drop-target {
+  outline: 1px solid #007fd4;
+  outline-offset: -1px;
+  background: #04395e;
   color: #ffffff;
 }
 
-.open-editor-select {
-  box-sizing: border-box;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  height: 28px;
-  padding: 0 8px 0 14px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-}
-
-.open-editor-close {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: #9aa5b1;
-  opacity: 0;
-}
-
-.open-editor-row.active .open-editor-close,
-.open-editor-row:hover .open-editor-close,
-.open-editor-row:focus-within .open-editor-close {
-  opacity: 1;
-}
-
-.open-editor-close:hover,
-.open-editor-close:focus-visible {
-  outline: none;
-  background: #3a414b;
-  color: #ffffff;
-}
-
-.editor-label {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  min-width: 0;
-}
-
-.editor-label-name,
-.editor-label-description,
 .tree-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.editor-label-description {
-  color: #87909c;
-  font-size: calc(var(--ui-font-size) - 2px);
 }
 
 .file-tree {
@@ -533,6 +451,20 @@ body.resizing-layout-row .shell::after {
 
 .explorer-tree-item vscode-icon {
   color: #aeb9c7;
+}
+
+.explorer-tree-item.dragging {
+  opacity: 0.55;
+}
+
+.explorer-tree-item.drop-target {
+  outline: 1px solid #007fd4;
+  outline-offset: -1px;
+  background: #04395e;
+}
+
+.file-tree.drop-target-root {
+  background: #111f2c;
 }
 
 .tab-icon {

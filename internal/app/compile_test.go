@@ -118,6 +118,30 @@ func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
 	}
 }
 
+func TestBaseCompileArgsUseRelativeProjectInclude(t *testing.T) {
+	projectDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
+
+	args := compiler.baseCompileArgs()
+	foundProjectInclude := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "-I" {
+			continue
+		}
+		foundProjectInclude = true
+		if args[i+1] != "." {
+			t.Fatalf("project include arg = %q, want relative .", args[i+1])
+		}
+	}
+	if !foundProjectInclude {
+		t.Fatalf("base compile args missing project include: %#v", args)
+	}
+	if strings.Contains(strings.Join(args, " "), projectDir) {
+		t.Fatalf("base compile args contain absolute project path: %#v", args)
+	}
+}
+
 func TestSanitizeCompilerArgsNormalizesRelativePathArgs(t *testing.T) {
 	projectDir := t.TempDir()
 	systemIncludeDir := t.TempDir()

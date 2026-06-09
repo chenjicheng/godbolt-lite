@@ -86,7 +86,7 @@ const statusEl = must("#status");
 const metaEl = must("#meta");
 const workspaceEl = must<HTMLDivElement>("#workspace");
 const sidebarEl = must<HTMLElement>(".sidebar");
-const openEditorsEl = must<HTMLDivElement>("#open-editors");
+const projectRootDropEl = must<HTMLElement>("#project-root-drop");
 const filesEl = must<VscodeTree>("#files");
 const tabsEl = must("#tabs");
 const asmPaneEl = must<HTMLElement>(".asm-pane");
@@ -173,6 +173,7 @@ let contextMenuInvoker: HTMLElement | null = null;
 let inlineRenameTarget: ExplorerTarget | null = null;
 let pendingExplorerFocus: ExplorerTarget | null = null;
 let folderStateInitialized = false;
+let draggingFilePath = "";
 let latestAsm = "";
 let latestDiagnostics = "";
 let latestRunOutput = "";
@@ -358,12 +359,8 @@ window.addEventListener("keydown", (event) => {
 });
 
 filesEl.addEventListener("scroll", () => hideFileMenu());
-filesEl.addEventListener("vsc-tree-select", (event) => {
-  const item = selectedTreeItems(event)[0];
-  if (!item) return;
+filesEl.addEventListener("vsc-tree-select", () => {
   captureOpenFolders();
-  const target = treeItemTarget(item);
-  if (target?.kind === "file") openFile(target.path);
 });
 filesEl.addEventListener("click", () => window.requestAnimationFrame(captureOpenFolders));
 filesEl.addEventListener("keydown", () => window.requestAnimationFrame(captureOpenFolders));
@@ -373,6 +370,23 @@ filesEl.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   showFileMenu(rootExplorerTarget, event.clientX, event.clientY, filesEl);
 });
+filesEl.addEventListener("dragover", (event) => {
+  if (!draggingFilePath) return;
+  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  if (item) return;
+  event.preventDefault();
+  filesEl.classList.add("drop-target-root");
+});
+filesEl.addEventListener("dragleave", () => filesEl.classList.remove("drop-target-root"));
+filesEl.addEventListener("drop", (event) => {
+  if (!draggingFilePath) return;
+  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  event.preventDefault();
+  filesEl.classList.remove("drop-target-root");
+  if (item) return;
+  void moveFileToFolder(draggingFilePath, "");
+});
+attachRootDropHandlers(projectRootDropEl);
 
 function openFile(pathInput: string): void {
   const canonicalPath = canonicalSourcePath(pathInput);
@@ -560,7 +574,6 @@ function renderFiles(captureTreeState = true): void {
   initialiseFolderState();
   if (inlineRenameTarget && !explorerTargetExists(inlineRenameTarget)) inlineRenameTarget = null;
 
-  renderOpenEditors();
   filesEl.innerHTML = "";
   for (const node of buildFileTree(sortedFiles())) {
     filesEl.append(renderExplorerNode(node));
@@ -570,40 +583,6 @@ function renderFiles(captureTreeState = true): void {
   pendingExplorerFocus = null;
   if (focusTarget) {
     window.requestAnimationFrame(() => explorerItemForTarget(focusTarget)?.focus());
-  }
-}
-
-function renderOpenEditors(): void {
-  pruneOpenTabs();
-  openEditorsEl.innerHTML = "";
-  const activePath = activeEditorPath();
-
-  for (const path of openTabs) {
-    const row = document.createElement("div");
-    row.className = pathsEqual(path, activePath) ? "open-editor-row active" : "open-editor-row";
-    row.title = path;
-    row.dataset.path = path;
-
-    const selectButton = document.createElement("button");
-    selectButton.type = "button";
-    selectButton.className = "open-editor-select";
-    selectButton.setAttribute("aria-label", `Open ${path}`);
-    selectButton.append(createIcon(iconNameForFile(path)), editorLabel(path, parentFolderPath(path)));
-    selectButton.addEventListener("click", () => openFile(path));
-
-    const closeButton = document.createElement("button");
-    closeButton.type = "button";
-    closeButton.className = "open-editor-close";
-    closeButton.title = `Close ${path}`;
-    closeButton.setAttribute("aria-label", `Close ${path}`);
-    closeButton.append(createIcon("close"));
-    closeButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      closeTab(path);
-    });
-
-    row.append(selectButton, closeButton);
-    openEditorsEl.append(row);
   }
 }
 
@@ -619,9 +598,12 @@ function renderExplorerNode(node: FileTreeNode): VscodeTreeItem {
     item.branch = true;
     item.open = openFolderPaths.has(node.path);
     item.append(createIcon("folder", "icon-branch"), createIcon("folder-opened", "icon-branch-opened"));
+    attachFolderDropHandlers(item, node.path);
   } else {
     item.selected = pathsEqual(node.path, activeEditorPath());
+    item.draggable = true;
     item.append(createIcon(iconNameForFile(node.path), "icon-leaf"));
+    attachFileDragHandlers(item, node.path);
   }
 
   appendTreeLabel(item, target, node.name);
@@ -632,17 +614,72 @@ function renderExplorerNode(node: FileTreeNode): VscodeTreeItem {
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    if (target.kind === "file") openFile(target.path);
     showFileMenu(target, event.clientX, event.clientY, item);
   });
   item.addEventListener("keydown", (event) => {
     if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
     event.preventDefault();
-    if (target.kind === "file") openFile(target.path);
     const rect = item.getBoundingClientRect();
     showFileMenu(target, rect.left + 8, rect.bottom + 4, item);
   });
+  item.addEventListener("click", (event) => {
+    if (target.kind !== "file" || event.target instanceof HTMLInputElement) return;
+    event.stopPropagation();
+    openFile(target.path);
+  });
   return item;
+}
+
+function attachFileDragHandlers(item: VscodeTreeItem, path: string): void {
+  item.addEventListener("dragstart", (event) => {
+    draggingFilePath = path;
+    item.classList.add("dragging");
+    event.dataTransfer?.setData("text/plain", path);
+    event.dataTransfer?.setData("application/x-mini-godbolt-file", path);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  });
+  item.addEventListener("dragend", () => {
+    draggingFilePath = "";
+    item.classList.remove("dragging");
+    clearDropTargets();
+  });
+}
+
+function attachFolderDropHandlers(item: VscodeTreeItem, folderPath: string): void {
+  item.addEventListener("dragover", (event) => {
+    if (!canDropFileIntoFolder(draggingFilePath, folderPath)) return;
+    event.preventDefault();
+    item.classList.add("drop-target");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  });
+  item.addEventListener("dragleave", () => {
+    item.classList.remove("drop-target");
+  });
+  item.addEventListener("drop", (event) => {
+    if (!canDropFileIntoFolder(draggingFilePath, folderPath)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    item.classList.remove("drop-target");
+    void moveFileToFolder(draggingFilePath, folderPath);
+  });
+}
+
+function attachRootDropHandlers(element: HTMLElement): void {
+  element.addEventListener("dragover", (event) => {
+    if (!canDropFileIntoFolder(draggingFilePath, "")) return;
+    event.preventDefault();
+    element.classList.add("drop-target");
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  });
+  element.addEventListener("dragleave", () => {
+    element.classList.remove("drop-target");
+  });
+  element.addEventListener("drop", (event) => {
+    if (!canDropFileIntoFolder(draggingFilePath, "")) return;
+    event.preventDefault();
+    element.classList.remove("drop-target");
+    void moveFileToFolder(draggingFilePath, "");
+  });
 }
 
 function appendTreeLabel(item: VscodeTreeItem, target: ExplorerTarget, labelText: string): void {
@@ -1092,12 +1129,6 @@ function targetFolderPath(target: ExplorerTarget): string {
   return "";
 }
 
-function selectedTreeItems(event: Event): VscodeTreeItem[] {
-  const detail = (event as CustomEvent<VscodeTreeItem[] | { selectedItems: VscodeTreeItem[] }>).detail;
-  if (Array.isArray(detail)) return detail;
-  return detail?.selectedItems ?? [];
-}
-
 function treeItemTarget(item: VscodeTreeItem): ExplorerTarget | undefined {
   const kind = item.dataset.projectKind;
   const path = item.dataset.projectPath ?? "";
@@ -1143,6 +1174,39 @@ function addOpenAncestors(path: string): void {
   for (const ancestor of folderAncestorPaths(path)) openFolderPaths.add(ancestor);
 }
 
+function canDropFileIntoFolder(filePath: string, folderPath: string): boolean {
+  if (!filePath || !project.files.some((file) => pathsEqual(file.path, filePath))) return false;
+  return !pathsEqual(parentFolderPath(filePath), folderPath);
+}
+
+async function moveFileToFolder(filePath: string, folderPath: string): Promise<void> {
+  const file = project.files.find((item) => pathsEqual(item.path, filePath));
+  if (!file) return;
+
+  const nextPath = childPathInFolder(folderPath, fileDisplayName(file.path));
+  if (pathsEqual(file.path, nextPath)) return;
+  if (project.files.some((item) => !pathsEqual(item.path, file.path) && pathsEqual(item.path, nextPath))) {
+    setDiagnostics(`${nextPath} already exists`);
+    return;
+  }
+
+  addOpenAncestors(nextPath);
+  try {
+    await renameFile(file.path, nextPath);
+  } finally {
+    draggingFilePath = "";
+    clearDropTargets();
+  }
+}
+
+function clearDropTargets(): void {
+  for (const item of filesEl.querySelectorAll<VscodeTreeItem>(".drop-target")) {
+    item.classList.remove("drop-target");
+  }
+  filesEl.classList.remove("drop-target-root");
+  projectRootDropEl.classList.remove("drop-target");
+}
+
 function createIcon(name: string, slot?: string): VscodeIcon {
   const icon = document.createElement("vscode-icon");
   icon.name = name;
@@ -1155,24 +1219,6 @@ function iconNameForFile(path: string): string {
   if (path.endsWith(".h")) return "symbol-file";
   if (path.endsWith(".inc")) return "file-text";
   return "file-code";
-}
-
-function editorLabel(path: string, description: string): HTMLSpanElement {
-  const wrapper = document.createElement("span");
-  wrapper.className = "editor-label";
-
-  const name = document.createElement("span");
-  name.className = "editor-label-name";
-  name.textContent = fileDisplayName(path);
-  wrapper.append(name);
-
-  if (description) {
-    const desc = document.createElement("span");
-    desc.className = "editor-label-description";
-    desc.textContent = description;
-    wrapper.append(desc);
-  }
-  return wrapper;
 }
 
 function scheduleSync(): void {
@@ -1435,7 +1481,7 @@ function renderAssembly(): void {
 }
 
 function renderMeta(status: StatusResponse): void {
-  metaEl.textContent = `Project: ${status.projectDir} | System: ${status.systemIncludeDir}`;
+  metaEl.textContent = status.ready ? "Project workspace ready | System headers ready" : "Project workspace ready | Toolchain missing";
 }
 
 editor.onMouseDown((event) => {
