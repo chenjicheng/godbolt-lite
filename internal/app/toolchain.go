@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,6 +22,18 @@ var embeddedToolchains embed.FS
 const toolchainReadyMarker = ".mini-godbolt-toolchain-ready"
 const maxEmbeddedToolchainEntries = 20000
 const maxEmbeddedToolchainUncompressedBytes = 700 << 20
+
+type toolchainZipLimits struct {
+	maxEntries         int
+	maxAdvertisedBytes uint64
+	maxCopiedBytes     uint64
+}
+
+var defaultToolchainZipLimits = toolchainZipLimits{
+	maxEntries:         maxEmbeddedToolchainEntries,
+	maxAdvertisedBytes: maxEmbeddedToolchainUncompressedBytes,
+	maxCopiedBytes:     maxEmbeddedToolchainUncompressedBytes,
+}
 
 type Toolchain struct {
 	Clang   string
@@ -102,14 +115,22 @@ func extractEmbeddedToolchain(cacheDir string) (Toolchain, error) {
 }
 
 func extractZipBytes(cacheDir string, data []byte) (Toolchain, error) {
+	return extractZipBytesWithLimits(cacheDir, data, defaultToolchainZipLimits)
+}
+
+func extractZipBytesWithLimits(cacheDir string, data []byte, limits toolchainZipLimits) (Toolchain, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return Toolchain{}, err
 	}
-	return extractZipReader(cacheDir, zr)
+	return extractZipReaderWithLimits(cacheDir, zr, limits)
 }
 
 func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
+	return extractZipReaderWithLimits(cacheDir, zr, defaultToolchainZipLimits)
+}
+
+func extractZipReaderWithLimits(cacheDir string, zr *zip.Reader, limits toolchainZipLimits) (Toolchain, error) {
 	root := filepath.Join(cacheDir, "toolchains", "llvm-windows-amd64")
 	parent := filepath.Dir(root)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -121,15 +142,16 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 	}
 	defer os.RemoveAll(tempRoot)
 
-	if err := validateEmbeddedZipEntries(zr); err != nil {
+	if err := validateEmbeddedZipEntriesWithLimits(zr, limits); err != nil {
 		return Toolchain{}, err
 	}
 
+	var copiedBytes uint64
 	for _, file := range zr.File {
 		archiveName := strings.ReplaceAll(file.Name, "\\", "/")
-		cleanName := filepath.Clean(archiveName)
-		if cleanName == "." || filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." {
-			return Toolchain{}, fmt.Errorf("embedded LLVM archive contains unsafe path %q", file.Name)
+		cleanName, err := normalizeZipEntryName(file.Name)
+		if err != nil {
+			return Toolchain{}, err
 		}
 		target := filepath.Join(tempRoot, cleanName)
 		if err := ensurePathInside(tempRoot, target); err != nil {
@@ -156,7 +178,8 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 			src.Close()
 			return Toolchain{}, err
 		}
-		_, copyErr := io.Copy(dst, src)
+		written, copyErr := copyWithByteLimit(dst, src, limits.maxCopiedBytes-copiedBytes, limits.maxCopiedBytes)
+		copiedBytes += written
 		closeErr := errors.Join(src.Close(), dst.Close())
 		if err := errors.Join(copyErr, closeErr); err != nil {
 			return Toolchain{}, err
@@ -191,15 +214,30 @@ func extractZipReader(cacheDir string, zr *zip.Reader) (Toolchain, error) {
 }
 
 func validateEmbeddedZipEntries(zr *zip.Reader) error {
-	if len(zr.File) > maxEmbeddedToolchainEntries {
-		return fmt.Errorf("embedded LLVM archive has %d entries; maximum is %d", len(zr.File), maxEmbeddedToolchainEntries)
+	return validateEmbeddedZipEntriesWithLimits(zr, defaultToolchainZipLimits)
+}
+
+func validateEmbeddedZipEntriesWithLimits(zr *zip.Reader, limits toolchainZipLimits) error {
+	if len(zr.File) > limits.maxEntries {
+		return fmt.Errorf("embedded LLVM archive has %d entries; maximum is %d", len(zr.File), limits.maxEntries)
 	}
 	var total uint64
+	seenPaths := map[string]string{}
 	for _, file := range zr.File {
-		total += file.UncompressedSize64
-		if total > maxEmbeddedToolchainUncompressedBytes {
-			return fmt.Errorf("embedded LLVM archive expands beyond %d bytes", maxEmbeddedToolchainUncompressedBytes)
+		cleanName, err := normalizeZipEntryName(file.Name)
+		if err != nil {
+			return err
 		}
+		key := strings.ToLower(cleanName)
+		if previous, ok := seenPaths[key]; ok {
+			return fmt.Errorf("embedded LLVM archive contains duplicate path %q normalized from %q and %q", cleanName, previous, file.Name)
+		}
+		seenPaths[key] = file.Name
+
+		if file.UncompressedSize64 > limits.maxAdvertisedBytes-total {
+			return fmt.Errorf("embedded LLVM archive expands beyond %d bytes", limits.maxAdvertisedBytes)
+		}
+		total += file.UncompressedSize64
 		if isZipDirectory(file, strings.ReplaceAll(file.Name, "\\", "/")) {
 			continue
 		}
@@ -208,6 +246,28 @@ func validateEmbeddedZipEntries(zr *zip.Reader) error {
 		}
 	}
 	return nil
+}
+
+func normalizeZipEntryName(name string) (string, error) {
+	archiveName := strings.ReplaceAll(name, "\\", "/")
+	cleanName := path.Clean(archiveName)
+	if cleanName == "." || path.IsAbs(cleanName) || strings.HasPrefix(cleanName, "../") || cleanName == ".." || hasWindowsDrivePrefix(cleanName) {
+		return "", fmt.Errorf("embedded LLVM archive contains unsafe path %q", name)
+	}
+	return cleanName, nil
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 && name[1] == ':' && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z'))
+}
+
+func copyWithByteLimit(dst io.Writer, src io.Reader, remaining, maxBytes uint64) (uint64, error) {
+	limited := &io.LimitedReader{R: src, N: int64(remaining) + 1}
+	written, err := io.Copy(dst, limited)
+	if uint64(written) > remaining {
+		return uint64(written), fmt.Errorf("embedded LLVM archive expands beyond %d bytes", maxBytes)
+	}
+	return uint64(written), err
 }
 
 func isZipDirectory(file *zip.File, archiveName string) bool {

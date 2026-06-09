@@ -18,6 +18,11 @@ The built-in standard headers are declarations for editing and compile-to-assemb
 
 ## Development
 
+Prerequisites:
+
+- Go 1.26.
+- Node.js `^20.19.0 || >=22.12.0` for the Vite web UI.
+
 ```powershell
 $env:GOCACHE = Join-Path (Get-Location) '.gocache'
 go test ./...
@@ -35,6 +40,7 @@ This creates both `dist/toolchain` for sidecar testing and `internal/app/toolcha
 For a release build:
 
 ```powershell
+New-Item -ItemType Directory -Force -Path .\.tmp | Out-Null
 if (Test-Path .\dist\toolchain) { Move-Item .\dist\toolchain .\.tmp\release-toolchain-backup }
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Release
 if (Test-Path .\.tmp\release-toolchain-backup) { Move-Item .\.tmp\release-toolchain-backup .\dist\toolchain }

@@ -201,7 +201,7 @@ Remove-DirectoryInsideRoot -BaseDir $root -Path ".\dist\include"
 New-Item -ItemType Directory -Force -Path ".\dist\include" | Out-Null
 
 if (Test-Path ".\include") {
-    Copy-Item -Path ".\include\*" -Destination ".\dist\include" -Recurse -Force
+    Copy-DirectoryContentsInsideRoot -BaseDir $root -SourceDir ".\include" -DestinationDir ".\dist\include"
 }
 
 if ($Release) {

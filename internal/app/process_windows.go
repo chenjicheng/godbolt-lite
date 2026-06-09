@@ -60,6 +60,10 @@ func runCommand(ctx context.Context, cmd *exec.Cmd) error {
 		return err
 	}
 
+	// exec.Cmd does not expose an atomic create-suspended, assign-to-job, and
+	// resume sequence. This job is a best-effort cleanup boundary for normal
+	// compiler/run processes, not a sandbox against a process that exits or
+	// spawns children before assignment.
 	job := createKillOnCloseJob()
 	if job == 0 {
 		_ = cmd.Process.Kill()

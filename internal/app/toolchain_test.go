@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,37 @@ func TestExtractZipBytesRejectsSymlinkEntry(t *testing.T) {
 	}
 	if _, err := extractZipBytes(t.TempDir(), out.Bytes()); err == nil {
 		t.Fatal("extractZipBytes accepted symlink entry")
+	}
+}
+
+func TestExtractZipBytesRejectsDuplicateNormalizedPath(t *testing.T) {
+	data := orderedToolchainZipBytes(t, []zipTestEntry{
+		{Name: `bin\clang.exe`, Content: "clang"},
+		{Name: `BIN/./CLANG.EXE`, Content: "duplicate"},
+	})
+	_, err := extractZipBytes(t.TempDir(), data)
+	if err == nil {
+		t.Fatal("extractZipBytes accepted duplicate normalized path")
+	}
+	if !strings.Contains(err.Error(), "duplicate path") {
+		t.Fatalf("extractZipBytes reported wrong error: %v", err)
+	}
+}
+
+func TestExtractZipBytesEnforcesActualCopyLimit(t *testing.T) {
+	data := orderedToolchainZipBytes(t, []zipTestEntry{
+		{Name: "payload.bin", Content: strings.Repeat("x", 64)},
+	})
+
+	// Keep advertised-size preflight above the zip entry size so this exercises
+	// the streaming copy limit instead of the header-based limit.
+	limits := toolchainZipLimits{maxEntries: 10, maxAdvertisedBytes: 100, maxCopiedBytes: 10}
+	_, err := extractZipBytesWithLimits(t.TempDir(), data, limits)
+	if err == nil {
+		t.Fatal("extractZipBytesWithLimits accepted zip that exceeded actual copy limit")
+	}
+	if !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("extractZipBytesWithLimits reported wrong error: %v", err)
 	}
 }
 
@@ -114,15 +146,29 @@ func TestExtractZipBytesTreatsTrailingSlashEntryAsDirectory(t *testing.T) {
 
 func toolchainZipBytes(t *testing.T, entries map[string]string) []byte {
 	t.Helper()
+	ordered := make([]zipTestEntry, 0, len(entries))
+	for name, content := range entries {
+		ordered = append(ordered, zipTestEntry{Name: name, Content: content})
+	}
+	return orderedToolchainZipBytes(t, ordered)
+}
+
+type zipTestEntry struct {
+	Name    string
+	Content string
+}
+
+func orderedToolchainZipBytes(t *testing.T, entries []zipTestEntry) []byte {
+	t.Helper()
 	var out bytes.Buffer
 	zw := zip.NewWriter(&out)
-	for name, content := range entries {
-		w, err := zw.Create(name)
+	for _, entry := range entries {
+		w, err := zw.Create(entry.Name)
 		if err != nil {
-			t.Fatalf("Create(%q) failed: %v", name, err)
+			t.Fatalf("Create(%q) failed: %v", entry.Name, err)
 		}
-		if _, err := w.Write([]byte(content)); err != nil {
-			t.Fatalf("Write(%q) failed: %v", name, err)
+		if _, err := w.Write([]byte(entry.Content)); err != nil {
+			t.Fatalf("Write(%q) failed: %v", entry.Name, err)
 		}
 	}
 	if err := zw.Close(); err != nil {
