@@ -12,7 +12,7 @@ export function mountAppShell(app: HTMLDivElement): void {
           <button id="compile" type="button">Compile</button>
           <button id="run" type="button">Run</button>
           <label class="auto-run-control">
-            <input id="auto-run" type="checkbox" />
+            <input id="auto-run" type="checkbox" aria-label="Auto-run" />
             <span>Auto-run</span>
           </label>
         </div>
@@ -30,12 +30,12 @@ export function mountAppShell(app: HTMLDivElement): void {
           </div>
           <div id="files" class="file-list"></div>
         </aside>
-        <div id="sidebar-resizer" class="layout-resizer layout-resizer-vertical" role="separator" aria-label="Resize file list" aria-orientation="vertical" tabindex="0"></div>
+        <div id="sidebar-resizer" class="layout-resizer layout-resizer-vertical"></div>
         <section class="editor-pane">
           <div id="tabs" class="tabs"></div>
           <div id="editor" class="editor"></div>
         </section>
-        <div id="asm-resizer" class="layout-resizer layout-resizer-vertical" role="separator" aria-label="Resize assembly pane" aria-orientation="vertical" tabindex="0"></div>
+        <div id="asm-resizer" class="layout-resizer layout-resizer-vertical"></div>
         <section class="asm-pane">
           <div class="panel-title asm-title">
             <span>Assembly</span>
@@ -45,15 +45,15 @@ export function mountAppShell(app: HTMLDivElement): void {
             </div>
           </div>
           <pre id="asm" class="asm-output"></pre>
-          <div id="console-resizer" class="layout-resizer layout-resizer-horizontal" role="separator" aria-label="Resize console panel" aria-orientation="horizontal" tabindex="0"></div>
+          <div id="console-resizer" class="layout-resizer layout-resizer-horizontal"></div>
           <div class="panel-title">Console</div>
           <pre id="console" class="console-output"></pre>
         </section>
       </div>
       <footer id="meta" class="meta"></footer>
-      <div id="file-menu" class="context-menu" role="menu" hidden>
-        <button id="file-menu-rename" type="button" role="menuitem"><span>Rename</span><kbd>F2</kbd></button>
-        <button id="file-menu-delete" type="button" role="menuitem" class="danger"><span>Delete</span><kbd>Del</kbd></button>
+      <div id="file-menu" class="context-menu" hidden>
+        <button id="file-menu-rename" type="button"><span>Rename</span><kbd>F2</kbd></button>
+        <button id="file-menu-delete" type="button" class="danger"><span>Delete</span><kbd>Del</kbd></button>
       </div>
       <div id="modal-backdrop" class="modal-backdrop" hidden>
         <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-message">
