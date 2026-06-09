@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows release
+    runs-on: windows-latest
+    env:
+      APP_NAME: godbolt-lite
+      LLVM_VERSION: 22.1.7
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Cache LLVM download
+        uses: actions/cache@v4
+        with:
+          path: downloads/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz
+          key: llvm-windows-msvc-${{ env.LLVM_VERSION }}
+
+      - name: Prepare LLVM toolchain
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\fetch-llvm.ps1 -Version $env:LLVM_VERSION
+
+      - name: Build and smoke test release
+        run: |
+          New-Item -ItemType Directory -Force -Path .\.tmp | Out-Null
+          if (Test-Path .\dist\toolchain) {
+              Move-Item -LiteralPath .\dist\toolchain -Destination .\.tmp\release-toolchain-backup
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Release
+
+      - name: Stage release assets
+        id: assets
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assetDir = Join-Path (Get-Location) "dist\release"
+          New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
+
+          $exeName = "$env:APP_NAME-$tag-windows-amd64.exe"
+          $exePath = Join-Path $assetDir $exeName
+          Copy-Item -LiteralPath ".\dist\mini-godbolt.exe" -Destination $exePath -Force
+
+          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exePath
+          $shaPath = "$exePath.sha256"
+          "$($hash.Hash.ToLowerInvariant())  $exeName" | Set-Content -LiteralPath $shaPath -Encoding ASCII
+
+          "exe=$exePath" >> $env:GITHUB_OUTPUT
+          "sha=$shaPath" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $exe = '${{ steps.assets.outputs.exe }}'
+          $sha = '${{ steps.assets.outputs.sha }}'
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag $exe $sha --clobber
+          } else {
+              gh release create $tag $exe $sha --title $tag --generate-notes --verify-tag
+          }

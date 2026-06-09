@@ -47,3 +47,16 @@ if (Test-Path .\.tmp\release-toolchain-backup) { Move-Item .\.tmp\release-toolch
 ```
 
 Release mode rebuilds the web UI, validates the embedded LLVM zip, rejects a masking `dist/toolchain` sidecar, starts the generated exe, confirms it uses the embedded cache toolchain rather than `PATH`, starts `clang.exe`, `clangd.exe`, and `lld-link.exe`, verifies clang resource headers with `<stddef.h>`, serves the rebuilt UI, and compiles the default project once.
+
+## GitHub tag releases
+
+Pushing a tag whose name starts with `v` triggers `.github/workflows/release.yml`.
+The workflow runs on `windows-latest`, downloads and verifies the configured official LLVM archive, prepares the embedded toolchain zip, runs `scripts/build.ps1 -Release`, and publishes these release assets:
+
+- `godbolt-lite-<tag>-windows-amd64.exe`
+- `godbolt-lite-<tag>-windows-amd64.exe.sha256`
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
