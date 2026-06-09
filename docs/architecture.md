@@ -10,10 +10,10 @@ toolchain/ (optional sidecar)
   bin/lld-link.exe
 ```
 
-Browser-managed project files are stored in:
+Browser-managed project files are stored in the app data project folder:
 
 ```text
-~/Desktop/mini-godbolt-project
+%APPDATA%\mini-godbolt\project
 ```
 
 C17 standard-library header stubs are embedded in the executable and extracted to:

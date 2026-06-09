@@ -51,6 +51,10 @@ func Run(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	projectDirSource := "default app data"
+	if flagWasSet(flags, "project-dir") {
+		projectDirSource = "explicit -project-dir"
+	}
 
 	systemIncludeDir, err := EnsureSystemInclude(cfg.CacheDir)
 	if err != nil {
@@ -75,7 +79,7 @@ func Run(ctx context.Context, args []string) error {
 
 	url := "http://" + listener.Addr().String()
 	log.Printf("mini-godbolt listening on %s", url)
-	log.Printf("project folder: %s", cfg.ProjectDir)
+	log.Printf("project folder (%s): %s", projectDirSource, cfg.ProjectDir)
 	log.Printf("system include folder: %s", cfg.SystemIncludeDir)
 	if srv.toolchainErr != nil {
 		log.Printf("toolchain unavailable: %v", srv.toolchainErr)
@@ -101,6 +105,16 @@ func Run(ctx context.Context, args []string) error {
 		}
 		return err
 	}
+}
+
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func NewServer(cfg Config) *Server {

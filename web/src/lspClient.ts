@@ -100,7 +100,7 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
             }
           }
         },
-        workspaceFolders: [{ uri: rootUri, name: "mini-godbolt-project" }]
+        workspaceFolders: [{ uri: rootUri, name: "mini-godbolt" }]
       })
         .then((result) => {
           initialized = true;

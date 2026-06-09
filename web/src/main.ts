@@ -174,6 +174,9 @@ let inlineRenameTarget: ExplorerTarget | null = null;
 let pendingExplorerFocus: ExplorerTarget | null = null;
 let folderStateInitialized = false;
 let draggingFilePath = "";
+let pendingPrimaryExplorerPath = "";
+let lastExplorerOpenPath = "";
+let lastExplorerOpenAt = 0;
 let latestAsm = "";
 let latestDiagnostics = "";
 let latestRunOutput = "";
@@ -317,19 +320,22 @@ fileMenuDeleteEl.addEventListener("click", () => {
   if (target.kind !== "root") void deleteExplorerTarget(target, restoreFocus);
 });
 
-window.addEventListener("click", (event) => {
-  if (!fileMenuEl.hidden && !fileMenuEl.contains(event.target as Node)) hideFileMenu();
-});
-
-window.addEventListener("contextmenu", (event) => {
-  if (
-    !fileMenuEl.hidden &&
-    !fileMenuEl.contains(event.target as Node) &&
-    !(event.target as Element).closest?.("vscode-tree-item")
-  ) {
+window.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (fileMenuEl.hidden || eventPathIncludes(event, fileMenuEl)) return;
     hideFileMenu();
-  }
-});
+  },
+  { capture: true }
+);
+window.addEventListener("contextmenu", (event) => {
+  if (fileMenuEl.hidden || eventPathIncludes(event, fileMenuEl)) return;
+  if (treeItemFromEvent(event) || eventPathIncludes(event, filesEl)) return;
+  hideFileMenu();
+}, { capture: true });
+window.addEventListener("blur", () => hideFileMenu());
+window.addEventListener("resize", () => hideFileMenu());
+document.addEventListener("scroll", () => hideFileMenu(), { capture: true });
 
 window.addEventListener("keydown", (event) => {
   if (modal.isActive() && !modal.contains(event.target as Node)) {
@@ -359,20 +365,45 @@ window.addEventListener("keydown", (event) => {
 });
 
 filesEl.addEventListener("scroll", () => hideFileMenu());
-filesEl.addEventListener("vsc-tree-select", () => {
-  captureOpenFolders();
+filesEl.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || eventPathHasInput(event)) {
+    pendingPrimaryExplorerPath = "";
+    return;
+  }
+  const target = explorerTargetFromEvent(event);
+  pendingPrimaryExplorerPath = target?.kind === "file" ? target.path : "";
+}, { capture: true });
+filesEl.addEventListener("pointerup", (event) => {
+  if (event.button !== 0 || eventPathHasInput(event)) return;
+  const target = explorerTargetFromEvent(event);
+  if (target?.kind !== "file") return;
+  if (!pendingPrimaryExplorerPath || !pathsEqual(target.path, pendingPrimaryExplorerPath)) {
+    pendingPrimaryExplorerPath = "";
+    return;
+  }
+  event.preventDefault();
+  openExplorerFile(target.path);
+}, { capture: true });
+filesEl.addEventListener("vsc-tree-select", (event) => {
+  window.requestAnimationFrame(captureOpenFolders);
+  const item = selectedTreeItems(event)[0];
+  const target = item ? treeItemTarget(item) : undefined;
+  if (target?.kind === "file" && pendingPrimaryExplorerPath && pathsEqual(target.path, pendingPrimaryExplorerPath)) {
+    openExplorerFile(target.path);
+  }
 });
 filesEl.addEventListener("click", () => window.requestAnimationFrame(captureOpenFolders));
 filesEl.addEventListener("keydown", () => window.requestAnimationFrame(captureOpenFolders));
 filesEl.addEventListener("contextmenu", (event) => {
-  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  pendingPrimaryExplorerPath = "";
+  const item = treeItemFromEvent(event);
   if (item) return;
   event.preventDefault();
   showFileMenu(rootExplorerTarget, event.clientX, event.clientY, filesEl);
 });
 filesEl.addEventListener("dragover", (event) => {
   if (!draggingFilePath) return;
-  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  const item = treeItemFromEvent(event);
   if (item) return;
   event.preventDefault();
   filesEl.classList.add("drop-target-root");
@@ -380,7 +411,7 @@ filesEl.addEventListener("dragover", (event) => {
 filesEl.addEventListener("dragleave", () => filesEl.classList.remove("drop-target-root"));
 filesEl.addEventListener("drop", (event) => {
   if (!draggingFilePath) return;
-  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  const item = treeItemFromEvent(event);
   event.preventDefault();
   filesEl.classList.remove("drop-target-root");
   if (item) return;
@@ -419,6 +450,16 @@ function openFile(pathInput: string): void {
   renderTabs();
   persistOpenTabs();
   if (!readOnly && path.endsWith(".c")) scheduleCompile();
+}
+
+function openExplorerFile(path: string): void {
+  const now = performance.now();
+  if (pathsEqual(path, lastExplorerOpenPath) && now - lastExplorerOpenAt < 150) return;
+  lastExplorerOpenPath = path;
+  lastExplorerOpenAt = now;
+  pendingPrimaryExplorerPath = "";
+  hideFileMenu();
+  openFile(path);
 }
 
 function ensureOpenTab(path: string): void {
@@ -622,11 +663,6 @@ function renderExplorerNode(node: FileTreeNode): VscodeTreeItem {
     const rect = item.getBoundingClientRect();
     showFileMenu(target, rect.left + 8, rect.bottom + 4, item);
   });
-  item.addEventListener("click", (event) => {
-    if (target.kind !== "file" || event.target instanceof HTMLInputElement) return;
-    event.stopPropagation();
-    openFile(target.path);
-  });
   return item;
 }
 
@@ -766,6 +802,39 @@ function explorerItemForTarget(target: ExplorerTarget): VscodeTreeItem | null {
     if (item.dataset.projectKind === target.kind && pathsEqual(item.dataset.projectPath ?? "", target.path)) return item;
   }
   return null;
+}
+
+function explorerTargetFromEvent(event: Event): ExplorerTarget | undefined {
+  const item = treeItemFromEvent(event);
+  return item ? treeItemTarget(item) : undefined;
+}
+
+function selectedTreeItems(event: Event): VscodeTreeItem[] {
+  const detail = (event as CustomEvent<VscodeTreeItem[] | { selectedItems: VscodeTreeItem[] }>).detail;
+  if (Array.isArray(detail)) return detail;
+  return detail?.selectedItems ?? [];
+}
+
+function treeItemFromEvent(event: Event): VscodeTreeItem | null {
+  for (const target of eventPath(event)) {
+    if (!(target instanceof Element)) continue;
+    if (target.localName === "vscode-tree-item") return target as VscodeTreeItem;
+    const item = target.closest?.("vscode-tree-item") as VscodeTreeItem | null;
+    if (item) return item;
+  }
+  return null;
+}
+
+function eventPathIncludes(event: Event, element: Element): boolean {
+  return eventPath(event).includes(element);
+}
+
+function eventPathHasInput(event: Event): boolean {
+  return eventPath(event).some((target) => target instanceof HTMLInputElement);
+}
+
+function eventPath(event: Event): EventTarget[] {
+  return typeof event.composedPath === "function" ? event.composedPath() : [event.target].filter(Boolean) as EventTarget[];
 }
 
 function showFileMenu(target: ExplorerTarget, x: number, y: number, invoker: HTMLElement): void {

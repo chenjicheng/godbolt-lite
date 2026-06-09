@@ -5,7 +5,7 @@ Windows single-exe mini Godbolt for C.
 ## Runtime behavior
 
 - The app starts a local HTTP server on `127.0.0.1` and opens the browser.
-- Browser-managed project files are stored in `~/Desktop/mini-godbolt-project`.
+- Browser-managed project files are stored in the app data project folder, such as `%APPDATA%\mini-godbolt\project` on Windows.
 - Third-party headers and source files are project files. Add vendor folders directly in the Explorer; the app no longer reads a separate `include/` folder next to the exe.
 - Built-in C17 header stubs are extracted to the app cache and passed to clang/clangd with `-isystem` for standard-header completion and semantic analysis.
 - Clang generates assembly. clangd powers completion, diagnostics, hover, semantic highlighting, and Ctrl+click navigation.

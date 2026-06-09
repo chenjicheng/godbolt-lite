@@ -19,7 +19,7 @@ Repository layout:
 Runtime model:
 
 - The app starts a local HTTP server on `127.0.0.1`.
-- Project files live in a project directory, defaulting to the desktop path in normal runtime.
+- Project files live in a project directory, defaulting to the app data project folder in normal runtime.
 - Third-party headers and source files are project files under the project directory; the app does not read a separate exe-adjacent `include/` folder.
 - Built-in C17 declaration stubs are extracted into the cache and passed with `-isystem`.
 - Toolchain discovery order is sidecar `toolchain/`, cached embedded zip extraction, embedded zip extraction, then `PATH`.

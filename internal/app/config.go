@@ -32,12 +32,16 @@ func DefaultConfig() (Config, error) {
 	if err != nil {
 		cacheBase = filepath.Join(home, "AppData", "Local")
 	}
+	configBase, err := os.UserConfigDir()
+	if err != nil {
+		configBase = cacheBase
+	}
 
 	return Config{
 		Addr:       "127.0.0.1:0",
 		OpenURL:    true,
 		ExeDir:     exeDir,
-		ProjectDir: filepath.Join(desktopDir(home), "mini-godbolt-project"),
+		ProjectDir: filepath.Join(configBase, appName, "project"),
 		CacheDir:   filepath.Join(cacheBase, appName),
 	}, nil
 }

@@ -23,9 +23,16 @@ function Invoke-CheckedTool {
         [string[]]$Arguments = @()
     )
 
-    $output = & $FilePath @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE. $output"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $FilePath @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$FilePath $($Arguments -join ' ') failed with exit code $exitCode. $output"
     }
 }
 
@@ -173,8 +180,8 @@ if (-not $SkipFrontend) {
     if (Test-Path ".\web\package.json") {
         Push-Location ".\web"
         try {
-            npm.cmd ci --ignore-scripts
-            npm.cmd run build
+            Invoke-CheckedTool "npm.cmd" @("ci", "--ignore-scripts")
+            Invoke-CheckedTool "npm.cmd" @("run", "build")
         } finally {
             Pop-Location
         }
@@ -191,12 +198,13 @@ $env:GOTMPDIR = Join-Path $root ".gotmp"
 $env:TEMP = Join-Path $root ".tmp"
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:GOCACHE, $env:GOTMPDIR, $env:TEMP | Out-Null
-go test ./...
+Invoke-CheckedTool "go" @("clean", "-cache")
+Invoke-CheckedTool "go" @("test", "-count=1", "./...")
 if (-not (Test-Path ".\internal\app\static\index.html")) {
     throw "internal\app\static\index.html is missing. Build the frontend first; -SkipFrontend is development-only."
 }
 New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
-go build -trimpath -ldflags="-s -w" -o ".\dist\mini-godbolt.exe" .\cmd\mini-godbolt
+Invoke-CheckedTool "go" @("build", "-trimpath", "-ldflags", "-s -w", "-o", ".\dist\mini-godbolt.exe", ".\cmd\mini-godbolt")
 
 if ($Release) {
     Assert-ReleaseSmoke

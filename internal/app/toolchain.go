@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 //go:embed toolchains/*
@@ -204,13 +205,28 @@ func extractZipReaderWithLimits(cacheDir string, zr *zip.Reader, limits toolchai
 	if err := os.RemoveAll(root); err != nil {
 		return Toolchain{}, err
 	}
-	if err := os.Rename(tempRoot, root); err != nil {
+	if err := renameToolchainRoot(tempRoot, root); err != nil {
 		return Toolchain{}, err
 	}
 	if tc, ok := discoverEmbeddedToolchain(cacheDir); ok {
 		return tc, nil
 	}
 	return Toolchain{}, fmt.Errorf("embedded LLVM archive extracted but validated toolchain was not found under %s", root)
+}
+
+func renameToolchainRoot(tempRoot, root string) error {
+	var err error
+	for attempt := 0; attempt < 6; attempt++ {
+		err = os.Rename(tempRoot, root)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
+	}
+	return err
 }
 
 func validateEmbeddedZipEntries(zr *zip.Reader) error {
