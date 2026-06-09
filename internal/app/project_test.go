@@ -130,6 +130,38 @@ func TestProjectStoreSyncWritesBeforeDeletingOldFiles(t *testing.T) {
 	}
 }
 
+func TestProjectStoreSyncCaseOnlyRenameKeepsFile(t *testing.T) {
+	dir := t.TempDir()
+	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	if err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "main.c",
+		Content: "int old(void){return 1;}\n",
+	}}}); err != nil {
+		t.Fatalf("initial Sync failed: %v", err)
+	}
+
+	if err := store.Sync(ProjectState{
+		ActiveFile: "MAIN.c",
+		Files: []ProjectFile{{
+			Path:    "MAIN.c",
+			Content: "int newer(void){return 2;}\n",
+		}},
+	}); err != nil {
+		t.Fatalf("case-only Sync failed: %v", err)
+	}
+
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(state.Files) != 1 || state.Files[0].Path != "MAIN.c" || !strings.Contains(state.Files[0].Content, "newer") {
+		t.Fatalf("state after case-only rename = %+v", state)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "MAIN.c")); err != nil {
+		t.Fatalf("renamed file missing after cleanup: %v", err)
+	}
+}
+
 func TestNormalizeStateRejectsProjectLimits(t *testing.T) {
 	t.Run("too many files", func(t *testing.T) {
 		files := make([]ProjectFile, maxProjectFiles+1)

@@ -172,10 +172,10 @@ func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) err
 	}
 	kept := make(map[string]struct{}, len(next.Files))
 	for _, file := range next.Files {
-		kept[file.Path] = struct{}{}
+		kept[strings.ToLower(file.Path)] = struct{}{}
 	}
 	for _, file := range previous.Files {
-		if _, ok := kept[file.Path]; ok {
+		if _, ok := kept[strings.ToLower(file.Path)]; ok {
 			continue
 		}
 		target := filepath.Join(p.dir, filepath.FromSlash(file.Path))
