@@ -85,8 +85,12 @@ jobs:
           $exe = '${{ steps.assets.outputs.exe }}'
           $sha = '${{ steps.assets.outputs.sha }}'
 
+          $oldErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
           gh release view $tag 1>$null 2>$null
           $releaseExists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = $oldErrorActionPreference
+
           if ($releaseExists) {
               gh release upload $tag $exe $sha --clobber
           } else {
