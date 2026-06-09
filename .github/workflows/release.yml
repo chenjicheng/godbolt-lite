@@ -85,8 +85,9 @@ jobs:
           $exe = '${{ steps.assets.outputs.exe }}'
           $sha = '${{ steps.assets.outputs.sha }}'
 
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          gh release view $tag 1>$null 2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists) {
               gh release upload $tag $exe $sha --clobber
           } else {
               gh release create $tag $exe $sha --title $tag --generate-notes --verify-tag
