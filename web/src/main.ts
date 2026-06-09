@@ -6,42 +6,22 @@ import { compile, fetchProject, fetchStatus, readSource, runProgram as runProgra
 import { highlightAssembly, simplifyAssembly } from "./assembly";
 import { mountAppShell, must } from "./appShell";
 import {
-  asmVisibleStorageKey,
-  asmWidthStorageKey,
   autoRunStorageKey,
-  baseAsmFontSize,
-  baseAsmLineHeight,
-  baseEditorFontSize,
-  baseEditorLineHeight,
-  codeFontScaleStorageKey,
-  consoleHeightStorageKey,
-  consoleVisibleStorageKey,
   defaultCompilerArgs,
   draftProjectStorageKey,
-  filesVisibleStorageKey,
-  fontScaleStep,
-  layoutResizerWidth,
-  legacyAsmFontScaleStorageKey,
   legacyDefaultCompilerArgs,
-  legacyDiagnosticsHeightStorageKey,
-  legacyEditorFontScaleStorageKey,
-  legacyGlobalFontScaleStorageKey,
-  legacyOutputHeightStorageKey,
   linuxDefaultCompilerArgs,
   malformedLinuxDefaultCompilerArgs,
-  maxFontScale,
   maxPersistedDraftAgeMs,
-  minAsmWidth,
-  minAssemblyTextHeight,
-  minBottomPanelHeight,
-  minEditorWidth,
-  minFontScale,
-  minSidebarWidth,
   openTabsStorageKey,
-  rightPaneChromeHeight,
-  sidebarWidthStorageKey,
   windowsDefaultCompilerArgs
 } from "./config";
+import {
+  createLayoutController,
+  editorFontSizeForScale,
+  editorLineHeightForScale,
+  readInitialCodeFontScale
+} from "./layoutController";
 import { attachLspClient, type LspHandle } from "./lspClient";
 import { createModalController } from "./modal";
 import { normalizeProjectPath, pathsEqual, validateEditableSourcePath } from "./projectPaths";
@@ -51,13 +31,10 @@ import {
   clearStoredDraft,
   readStoredDraft,
   readStoredBoolean,
-  readStoredFontScale,
   readStoredOpenTabs,
-  readStoredPixels,
   writeStoredBoolean,
   writeStoredDraft,
-  writeStoredOpenTabs,
-  writeStoredPixels
+  writeStoredOpenTabs
 } from "./storage";
 import type { CompileResponse, ProjectFile, ProjectState, RunResponse, StatusResponse } from "./types";
 
@@ -113,21 +90,15 @@ const modal = createModalController(
   { beforeOpen: hideFileMenu }
 );
 
-let codeFontScale = readInitialCodeFontScale();
-let sidebarWidth = readStoredPixels(sidebarWidthStorageKey, minSidebarWidth);
-let asmWidth = readStoredPixels(asmWidthStorageKey, minAsmWidth);
-let consoleHeight = readInitialConsoleHeight();
-let filesVisible = readStoredBoolean(filesVisibleStorageKey, true);
-let asmVisible = readStoredBoolean(asmVisibleStorageKey, true);
-let consoleVisible = readStoredBoolean(consoleVisibleStorageKey, true);
+const initialCodeFontScale = readInitialCodeFontScale();
 autoRunEl.checked = readStoredBoolean(autoRunStorageKey);
 
 const editor = monaco.editor.create(editorHostEl, {
   automaticLayout: true,
   fontFamily: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace",
-  fontSize: editorFontSize(),
+  fontSize: editorFontSizeForScale(initialCodeFontScale),
   fontLigatures: false,
-  lineHeight: editorLineHeight(),
+  lineHeight: editorLineHeightForScale(initialCodeFontScale),
   minimap: { enabled: false },
   mouseWheelZoom: false,
   quickSuggestions: { comments: false, other: true, strings: true },
@@ -165,24 +136,25 @@ let latestAsm = "";
 let latestDiagnostics = "";
 let latestRunOutput = "";
 let asmView: "csapp" | "raw" = "csapp";
-let activeLayoutResize: LayoutResizeState | null = null;
-let editorLayoutFrame: number | undefined;
-
-type LayoutResizeKind = "sidebar" | "asm" | "console";
-
-type LayoutResizeState = {
-  kind: LayoutResizeKind;
-  handle: HTMLDivElement;
-  pointerId: number;
-  startX: number;
-  startY: number;
-  startSize: number;
-};
-
-applyViewVisibility();
-applyLayoutSizes();
-attachLayoutResizers();
-applyFontScales();
+const layoutController = createLayoutController({
+  editor,
+  elements: {
+    workspace: workspaceEl,
+    sidebar: sidebarEl,
+    asmPane: asmPaneEl,
+    editorHost: editorHostEl,
+    console: consoleEl,
+    toggleFiles: toggleFilesEl,
+    toggleAsm: toggleAsmEl,
+    toggleConsole: toggleConsoleEl,
+    sidebarResizer: sidebarResizerEl,
+    asmResizer: asmResizerEl,
+    consoleResizer: consoleResizerEl
+  },
+  initialCodeFontScale,
+  beforeResize: hideFileMenu
+});
+layoutController.attach();
 void boot();
 
 async function boot(): Promise<void> {
@@ -249,24 +221,6 @@ argsCsappEl.addEventListener("click", () => {
   setCompilerArgs(linuxDefaultCompilerArgs);
 });
 
-toggleFilesEl.addEventListener("click", () => {
-  filesVisible = !filesVisible;
-  writeStoredBoolean(filesVisibleStorageKey, filesVisible);
-  applyViewVisibility();
-});
-
-toggleAsmEl.addEventListener("click", () => {
-  asmVisible = !asmVisible;
-  writeStoredBoolean(asmVisibleStorageKey, asmVisible);
-  applyViewVisibility();
-});
-
-toggleConsoleEl.addEventListener("click", () => {
-  consoleVisible = !consoleVisible;
-  writeStoredBoolean(consoleVisibleStorageKey, consoleVisible);
-  applyViewVisibility();
-});
-
 asmCsappEl.addEventListener("click", () => {
   asmView = "csapp";
   renderAssembly();
@@ -283,8 +237,6 @@ compilerArgsEl.addEventListener("input", () => {
   scheduleSync();
   scheduleCompile();
 });
-
-window.addEventListener("wheel", handleFontZoomWheel, { passive: false });
 
 must("#new-file").addEventListener("click", () => createFile());
 
@@ -1040,291 +992,6 @@ function renderAssembly(): void {
   asmEl.innerHTML = highlightAssembly(text);
 }
 
-function handleFontZoomWheel(event: WheelEvent): void {
-  if (!event.ctrlKey && !event.metaKey) return;
-  if (!isCodeFontZoomTarget(event.target)) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  const direction = event.deltaY < 0 ? 1 : -1;
-  setCodeFontScale(codeFontScale + direction * fontScaleStep);
-}
-
-function attachLayoutResizers(): void {
-  sidebarResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("sidebar", event));
-  asmResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("asm", event));
-  consoleResizerEl.addEventListener("pointerdown", (event) => startLayoutResize("console", event));
-  sidebarResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
-  asmResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
-  consoleResizerEl.addEventListener("lostpointercapture", finishLayoutResize);
-  window.addEventListener("pointermove", handleLayoutResizeMove);
-  window.addEventListener("pointerup", finishLayoutResize);
-  window.addEventListener("pointercancel", finishLayoutResize);
-  window.addEventListener("blur", finishLayoutResize);
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) finishLayoutResize();
-  });
-  window.addEventListener("resize", () => {
-    clampLayoutSizesToViewport();
-    applyLayoutSizes();
-    queueEditorLayout();
-  });
-}
-
-function applyViewVisibility(): void {
-  workspaceEl.classList.toggle("files-hidden", !filesVisible);
-  workspaceEl.classList.toggle("asm-hidden", !asmVisible);
-  asmPaneEl.classList.toggle("console-hidden", !consoleVisible);
-
-  toggleFilesEl.classList.toggle("active", filesVisible);
-  toggleAsmEl.classList.toggle("active", asmVisible);
-  toggleConsoleEl.classList.toggle("active", consoleVisible);
-  toggleFilesEl.setAttribute("aria-pressed", String(filesVisible));
-  toggleAsmEl.setAttribute("aria-pressed", String(asmVisible));
-  toggleConsoleEl.setAttribute("aria-pressed", String(consoleVisible));
-
-  clampLayoutSizesToViewport();
-  applyLayoutSizes();
-  queueSettledEditorLayout();
-}
-
-function startLayoutResize(kind: LayoutResizeKind, event: PointerEvent): void {
-  if (window.matchMedia("(max-width: 980px)").matches) return;
-
-  const handle = event.currentTarget as HTMLDivElement;
-  event.preventDefault();
-  hideFileMenu();
-  activeLayoutResize = {
-    kind,
-    handle,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    startSize: currentLayoutSize(kind)
-  };
-  handle.classList.add("active");
-  document.body.classList.add(
-    "resizing-layout",
-    kind === "sidebar" || kind === "asm" ? "resizing-layout-col" : "resizing-layout-row"
-  );
-  handle.setPointerCapture(event.pointerId);
-}
-
-function handleLayoutResizeMove(event: PointerEvent): void {
-  if (!activeLayoutResize) return;
-
-  event.preventDefault();
-  const dx = event.clientX - activeLayoutResize.startX;
-  const dy = event.clientY - activeLayoutResize.startY;
-
-  switch (activeLayoutResize.kind) {
-    case "sidebar":
-      sidebarWidth = clampPixels(activeLayoutResize.startSize + dx, minSidebarWidth, maxSidebarWidth());
-      break;
-    case "asm":
-      asmWidth = clampPixels(activeLayoutResize.startSize - dx, minAsmWidth, maxAsmWidth());
-      break;
-    case "console":
-      consoleHeight = clampPixels(activeLayoutResize.startSize - dy, minBottomPanelHeight, maxConsoleHeight());
-      break;
-  }
-
-  applyLayoutSizes();
-  queueEditorLayout();
-}
-
-function finishLayoutResize(): void {
-  const resize = activeLayoutResize;
-  if (!resize) return;
-  activeLayoutResize = null;
-
-  resize.handle.classList.remove("active");
-  try {
-    resize.handle.releasePointerCapture(resize.pointerId);
-  } catch {
-    // The browser can release capture before pointerup when a drag leaves the window.
-  }
-  persistLayoutSize(resize.kind);
-  document.body.classList.remove("resizing-layout", "resizing-layout-col", "resizing-layout-row");
-  queueSettledEditorLayout();
-}
-
-function applyLayoutSizes(): void {
-  setOptionalPixelCssVar("--sidebar-width", sidebarWidth);
-  setOptionalPixelCssVar("--asm-width", asmWidth);
-  setOptionalPixelCssVar("--console-height", consoleHeight);
-}
-
-function clampLayoutSizesToViewport(): void {
-  if (sidebarWidth !== undefined) sidebarWidth = clampPixels(sidebarWidth, minSidebarWidth, maxSidebarWidth());
-  if (asmWidth !== undefined) asmWidth = clampPixels(asmWidth, minAsmWidth, maxAsmWidth());
-  if (consoleHeight !== undefined) consoleHeight = clampPixels(consoleHeight, minBottomPanelHeight, maxConsoleHeight());
-}
-
-function persistLayoutSize(kind: LayoutResizeKind): void {
-  switch (kind) {
-    case "sidebar":
-      if (sidebarWidth !== undefined) writeStoredPixels(sidebarWidthStorageKey, sidebarWidth);
-      break;
-    case "asm":
-      if (asmWidth !== undefined) writeStoredPixels(asmWidthStorageKey, asmWidth);
-      break;
-    case "console":
-      if (consoleHeight !== undefined) writeStoredPixels(consoleHeightStorageKey, consoleHeight);
-      break;
-  }
-}
-
-function currentLayoutSize(kind: LayoutResizeKind): number {
-  switch (kind) {
-    case "sidebar":
-      return measuredWidth(sidebarEl, 220);
-    case "asm":
-      return measuredWidth(asmPaneEl, Math.round(window.innerWidth * 0.46));
-    case "console":
-      return measuredHeight(consoleEl, Math.round(window.innerHeight * 0.24));
-  }
-}
-
-function maxSidebarWidth(): number {
-  const workspaceWidth = workspaceEl.clientWidth || window.innerWidth;
-  const reservedAsmWidth = asmVisible ? currentAsmWidth() : 0;
-  const visibleResizerWidth = layoutResizerWidth + (asmVisible ? layoutResizerWidth : 0);
-  return Math.max(minSidebarWidth, workspaceWidth - reservedAsmWidth - minEditorWidth - visibleResizerWidth);
-}
-
-function maxAsmWidth(): number {
-  const workspaceWidth = workspaceEl.clientWidth || window.innerWidth;
-  const reservedSidebarWidth = filesVisible ? currentSidebarWidth() : 0;
-  const visibleResizerWidth = layoutResizerWidth + (filesVisible ? layoutResizerWidth : 0);
-  return Math.max(minAsmWidth, workspaceWidth - reservedSidebarWidth - minEditorWidth - visibleResizerWidth);
-}
-
-function maxConsoleHeight(): number {
-  const paneHeight = asmPaneEl.clientHeight || window.innerHeight;
-  return Math.max(minBottomPanelHeight, paneHeight - rightPaneChromeHeight - minAssemblyTextHeight);
-}
-
-function currentSidebarWidth(): number {
-  return sidebarWidth ?? measuredWidth(sidebarEl, 220);
-}
-
-function currentAsmWidth(): number {
-  return asmWidth ?? measuredWidth(asmPaneEl, Math.round(window.innerWidth * 0.46));
-}
-
-function measuredWidth(element: Element, fallback: number): number {
-  const width = element.getBoundingClientRect().width;
-  return Number.isFinite(width) && width > 0 ? width : fallback;
-}
-
-function measuredHeight(element: Element, fallback: number): number {
-  const height = element.getBoundingClientRect().height;
-  return Number.isFinite(height) && height > 0 ? height : fallback;
-}
-
-function setOptionalPixelCssVar(name: string, value: number | undefined): void {
-  if (value === undefined) {
-    document.documentElement.style.removeProperty(name);
-    return;
-  }
-  document.documentElement.style.setProperty(name, `${value}px`);
-}
-
-function queueEditorLayout(): void {
-  if (editorLayoutFrame !== undefined) return;
-  editorLayoutFrame = window.requestAnimationFrame(() => {
-    editorLayoutFrame = undefined;
-    layoutEditorToHost();
-  });
-}
-
-function queueSettledEditorLayout(): void {
-  queueEditorLayout();
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(layoutEditorToHost);
-  });
-}
-
-function layoutEditorToHost(): void {
-  const rect = editorHostEl.getBoundingClientRect();
-  const width = Math.floor(rect.width);
-  const height = Math.floor(rect.height);
-  if (width > 0 && height > 0) {
-    editor.layout({ width, height });
-    return;
-  }
-  editor.layout();
-}
-
-function isCodeFontZoomTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  return Boolean(target.closest(".editor") || target.closest(".asm-output"));
-}
-
-function setCodeFontScale(nextScale: number): void {
-  codeFontScale = clampFontScale(nextScale);
-  try {
-    localStorage.setItem(codeFontScaleStorageKey, String(codeFontScale));
-    localStorage.setItem(legacyEditorFontScaleStorageKey, String(codeFontScale));
-    localStorage.setItem(legacyAsmFontScaleStorageKey, String(codeFontScale));
-  } catch {
-    // localStorage can be unavailable in restricted browser contexts.
-  }
-  applyFontScales();
-}
-
-function applyFontScales(): void {
-  document.documentElement.style.setProperty("--asm-font-size", `${Math.round(baseAsmFontSize * codeFontScale)}px`);
-  document.documentElement.style.setProperty("--asm-line-height", `${Math.round(baseAsmLineHeight * codeFontScale)}px`);
-  editor.updateOptions({
-    fontSize: editorFontSize(),
-    lineHeight: editorLineHeight()
-  });
-  queueEditorLayout();
-}
-
-function readInitialCodeFontScale(): number {
-  const current = readStoredFontScale(codeFontScaleStorageKey, clampFontScale);
-  if (current !== undefined) return current;
-
-  const legacyScales = [
-    readStoredFontScale(legacyEditorFontScaleStorageKey, clampFontScale),
-    readStoredFontScale(legacyAsmFontScaleStorageKey, clampFontScale),
-    readStoredFontScale(legacyGlobalFontScaleStorageKey, clampFontScale)
-  ].filter((value): value is number => value !== undefined);
-  if (legacyScales.length > 0) return Math.max(...legacyScales);
-  return 1;
-}
-
-function readInitialConsoleHeight(): number | undefined {
-  const current = readStoredPixels(consoleHeightStorageKey, minBottomPanelHeight);
-  if (current !== undefined) return current;
-
-  const legacyHeights = [
-    readStoredPixels(legacyDiagnosticsHeightStorageKey, minBottomPanelHeight),
-    readStoredPixels(legacyOutputHeightStorageKey, minBottomPanelHeight)
-  ].filter((value): value is number => value !== undefined);
-  if (legacyHeights.length > 0) return Math.max(...legacyHeights);
-  return undefined;
-}
-
-function editorFontSize(): number {
-  return Math.round(baseEditorFontSize * codeFontScale);
-}
-
-function editorLineHeight(): number {
-  return Math.round(baseEditorLineHeight * codeFontScale);
-}
-
-function clampFontScale(value: number): number {
-  return Math.min(maxFontScale, Math.max(minFontScale, value));
-}
-
-function clampPixels(value: number, min: number, max: number): number {
-  return Math.round(Math.min(Math.max(min, max), Math.max(min, value)));
-}
-
 function renderMeta(status: StatusResponse): void {
   metaEl.textContent = `Project: ${status.projectDir} | Include: ${status.includeDir} | System: ${status.systemIncludeDir}`;
 }
@@ -1413,5 +1080,6 @@ function shortcutTargetPath(target: EventTarget | null): string {
 
 window.addEventListener("beforeunload", () => {
   persistOpenTabs();
+  layoutController.dispose();
   lsp?.dispose();
 });
