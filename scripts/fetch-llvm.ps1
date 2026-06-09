@@ -21,6 +21,27 @@ $zipPath = Join-Path $root "internal\app\toolchains\llvm-windows-amd64.zip"
 $maxToolchainZipEntries = 20000
 $maxToolchainZipUncompressedBytes = 700MB
 
+function Invoke-CheckedTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $FilePath @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$FilePath $($Arguments -join ' ') failed with exit code $exitCode. $output"
+    }
+    return $output
+}
+
 function Normalize-ArchiveEntryName {
     param(
         [Parameter(Mandatory = $true)]
@@ -44,18 +65,12 @@ function Assert-TarArchiveSafe {
         [string]$ArchivePath
     )
 
-    $entries = tar -tf $ArchivePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not list tar archive entries."
-    }
+    $entries = Invoke-CheckedTool "tar" @("-tf", $ArchivePath)
     foreach ($entry in $entries) {
         Assert-ArchiveEntryNameSafe $entry
     }
 
-    $verboseEntries = tar -tvf $ArchivePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not inspect tar archive entry types."
-    }
+    $verboseEntries = Invoke-CheckedTool "tar" @("-tvf", $ArchivePath)
     foreach ($line in $verboseEntries) {
         if ([string]::IsNullOrWhiteSpace($line)) {
             continue
@@ -154,7 +169,7 @@ function Assert-ToolchainZipShape {
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null
 
 if (-not (Test-Path $archive)) {
-    curl.exe -L --fail --progress-bar -o $archive $url
+    Invoke-CheckedTool "curl.exe" @("-L", "--fail", "--progress-bar", "-o", $archive, $url)
 }
 
 $actualHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -167,7 +182,7 @@ if (Test-Path $extractDir) {
 }
 New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 Assert-TarArchiveSafe $archive
-tar -xf $archive -C $extractDir
+Invoke-CheckedTool "tar" @("-xf", $archive, "-C", $extractDir)
 $clangResourceRoot = Join-Path $fullDir "lib\clang"
 $clangResourceDir = Get-ChildItem -LiteralPath $clangResourceRoot -Directory |
     Sort-Object Name -Descending |

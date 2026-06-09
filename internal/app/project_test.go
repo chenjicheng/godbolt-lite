@@ -186,6 +186,48 @@ func TestProjectStoreSyncWritesBeforeDeletingOldFiles(t *testing.T) {
 	}
 }
 
+func TestProjectStoreSyncDoesNotCommitManifestBeforeDeleteSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
+	if err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "old.c",
+		Content: "int old(void){return 1;}\n",
+	}}}); err != nil {
+		t.Fatalf("initial Sync failed: %v", err)
+	}
+
+	oldPath := filepath.Join(dir, "old.c")
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(oldPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldPath, "locked.txt"), []byte("not removable by os.Remove"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "new.c",
+		Content: "int newer(void){return 2;}\n",
+	}}})
+	if err == nil {
+		t.Fatal("Sync succeeded despite undeletable old path")
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(dir, "project.json"))
+	if readErr != nil {
+		t.Fatalf("project.json missing after failed Sync: %v", readErr)
+	}
+	var manifest ProjectState
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("project.json invalid after failed Sync: %v", err)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Path != "old.c" {
+		t.Fatalf("project.json committed failed Sync: %+v", manifest)
+	}
+}
+
 func TestProjectStoreSyncCaseOnlyRenameKeepsFile(t *testing.T) {
 	dir := t.TempDir()
 	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")

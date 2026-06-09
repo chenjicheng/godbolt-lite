@@ -153,13 +153,17 @@ func (p *ProjectStore) writeLocked(state, previous ProjectState) error {
 		}
 	}
 
+	if err := p.removeDeletedFilesLocked(previous, state); err != nil {
+		return err
+	}
+
 	if err := p.writeProjectFileAtomically(filepath.Join(p.dir, "compile_commands.json"), compileCommands, 0o644); err != nil {
 		return err
 	}
 	if err := p.writeProjectFileAtomically(filepath.Join(p.dir, "project.json"), manifest, 0o644); err != nil {
 		return err
 	}
-	return p.removeDeletedFilesLocked(previous, state)
+	return nil
 }
 
 func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) error {

@@ -50,22 +50,6 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 		return SourceReadResponse{}, err
 	}
 
-	if rel, ok := pathRelIfInside(s.cfg.ProjectDir, absPath); ok {
-		if err := validateReadableSourceRel(rel); err != nil {
-			return SourceReadResponse{}, err
-		}
-		data, err := readRegularSourceFile(absPath)
-		if err != nil {
-			return SourceReadResponse{}, err
-		}
-		return SourceReadResponse{
-			URI:      uri,
-			Path:     filepath.ToSlash(rel),
-			Content:  string(data),
-			ReadOnly: false,
-		}, nil
-	}
-
 	if rel, ok := pathRelIfInside(s.cfg.SystemIncludeDir, absPath); ok {
 		if err := validateReadableSourceRel(rel); err != nil {
 			return SourceReadResponse{}, err
@@ -79,6 +63,22 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 			Path:     "external/system/" + filepath.ToSlash(rel),
 			Content:  string(data),
 			ReadOnly: true,
+		}, nil
+	}
+
+	if rel, ok := pathRelIfInside(s.cfg.ProjectDir, absPath); ok {
+		if err := validateReadableSourceRel(rel); err != nil {
+			return SourceReadResponse{}, err
+		}
+		data, err := readRegularSourceFile(absPath)
+		if err != nil {
+			return SourceReadResponse{}, err
+		}
+		return SourceReadResponse{
+			URI:      uri,
+			Path:     filepath.ToSlash(rel),
+			Content:  string(data),
+			ReadOnly: false,
 		}, nil
 	}
 

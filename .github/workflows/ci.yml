@@ -40,11 +40,5 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Build web UI
-        working-directory: web
-        run: |
-          npm.cmd ci --ignore-scripts
-          npm.cmd run build
-
-      - name: Run Go tests
-        run: go test ./...
+      - name: Build and test
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1

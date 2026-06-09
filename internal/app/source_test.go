@@ -40,6 +40,28 @@ func TestReadAllowedSourceAllowsSystemIncludes(t *testing.T) {
 	}
 }
 
+func TestReadAllowedSourcePrefersSystemIncludesInsideProjectDir(t *testing.T) {
+	projectDir := t.TempDir()
+	systemIncludeDir := filepath.Join(projectDir, "system-include", "c17")
+	writeTestFile(t, systemIncludeDir, "stdio.h", "int printf(const char *, ...);\n")
+
+	server := &Server{cfg: Config{
+		ProjectDir:       projectDir,
+		SystemIncludeDir: systemIncludeDir,
+	}}
+	path := filepath.Join(systemIncludeDir, "stdio.h")
+	resp, err := server.readAllowedSource(pathToTestFileURI(path), path)
+	if err != nil {
+		t.Fatalf("readAllowedSource failed: %v", err)
+	}
+	if !resp.ReadOnly {
+		t.Fatal("system include inside project should be read-only")
+	}
+	if resp.Path != "external/system/stdio.h" {
+		t.Fatalf("Path = %q, want external/system/stdio.h", resp.Path)
+	}
+}
+
 func TestReadAllowedSourceAllowsIncFiles(t *testing.T) {
 	projectDir := t.TempDir()
 	systemIncludeDir := t.TempDir()

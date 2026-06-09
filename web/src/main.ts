@@ -129,6 +129,11 @@ autoRunEl.checked = readStoredBoolean(autoRunStorageKey);
 tabsEl.setAttribute("role", "tablist");
 tabsEl.setAttribute("aria-label", "Open files");
 
+const maxProjectFiles = 128;
+const maxProjectFileBytes = 512 << 10;
+const maxProjectTotalBytes = 2 << 20;
+const maxCompilerArgsBytes = 8 << 10;
+
 const editor = monaco.editor.create(editorHostEl, {
   automaticLayout: true,
   fontFamily: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace",
@@ -449,7 +454,11 @@ function openFile(pathInput: string): void {
   renderFiles(false);
   renderTabs();
   persistOpenTabs();
-  if (!readOnly && path.endsWith(".c")) scheduleCompile();
+  if (!readOnly && path.endsWith(".c")) {
+    scheduleCompile();
+  } else {
+    suspendToolRunsForNonCompilableFile(readOnly);
+  }
 }
 
 function openExplorerFile(path: string): void {
@@ -1428,7 +1437,11 @@ function draftProjectFromStorage(serverProject: ProjectState): ProjectState | un
     clearStoredDraft(draftProjectStorageKey);
     return undefined;
   }
-  if (!isProjectStateLike(draft.project) || draft.baseHash !== projectFingerprint(serverProject)) {
+  if (
+    !isProjectStateLike(draft.project) ||
+    !isValidDraftProject(draft.project) ||
+    draft.baseHash !== projectFingerprint(serverProject)
+  ) {
     clearStoredDraft(draftProjectStorageKey);
     return undefined;
   }
@@ -1466,6 +1479,10 @@ function queueProjectSync(snapshot: ProjectState, version: number): Promise<Proj
         clearStoredDraft(draftProjectStorageKey);
       }
       return saved;
+    })
+    .catch((error) => {
+      if (version === syncVersion) clearStoredDraft(draftProjectStorageKey);
+      throw error;
     });
   syncQueue = task.then(
     () => undefined,
@@ -1478,6 +1495,43 @@ function invalidateToolRuns(): void {
   toolRunRevision += 1;
   latestCompileId = "";
   latestRunId = "";
+}
+
+function suspendToolRunsForNonCompilableFile(readOnly: boolean): void {
+  cancelPendingCompile();
+  invalidateToolRuns();
+  clearTransientOutputs("");
+  statusEl.textContent = readOnly ? "Read-only source open" : "Open a .c file to compile";
+}
+
+function isValidDraftProject(state: ProjectState): boolean {
+  if (state.files.length === 0 || state.files.length > maxProjectFiles) return false;
+  if (new TextEncoder().encode(state.compilerArgs).length > maxCompilerArgsBytes) return false;
+
+  let totalBytes = 0;
+  const seenPaths = new Set<string>();
+  for (const file of state.files) {
+    const normalizedPath = normalizeProjectPath(file.path);
+    if (normalizedPath !== file.path) return false;
+    if (validateEditableSourcePath(file.path)) return false;
+
+    const seenKey = file.path.toLowerCase();
+    if (seenPaths.has(seenKey)) return false;
+    seenPaths.add(seenKey);
+
+    const contentBytes = new TextEncoder().encode(file.content).length;
+    if (contentBytes > maxProjectFileBytes) return false;
+    totalBytes += contentBytes;
+    if (totalBytes > maxProjectTotalBytes) return false;
+  }
+
+  if (state.activeFile) {
+    const normalizedActiveFile = normalizeProjectPath(state.activeFile);
+    if (normalizedActiveFile !== state.activeFile) return false;
+    if (validateEditableSourcePath(state.activeFile)) return false;
+    if (!state.files.some((file) => pathsEqual(file.path, state.activeFile))) return false;
+  }
+  return true;
 }
 
 function renderCompile(result: CompileResponse): void {
@@ -1586,6 +1640,7 @@ async function jumpToDefinition(model: monaco.editor.ITextModel, position: monac
         } else {
           project.files.push({ path: normalizedPath, content: source.content });
           path = normalizedPath;
+          scheduleSync();
         }
       }
     }
