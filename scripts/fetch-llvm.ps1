@@ -75,6 +75,7 @@ function New-ToolchainZip {
         [string]$DestinationPath
     )
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     if (Test-Path $DestinationPath) {
         Remove-Item -LiteralPath $DestinationPath -Force
@@ -111,6 +112,7 @@ function Assert-ToolchainZipShape {
         [string]$ZipPath
     )
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $ZipPath).Path)
     try {
