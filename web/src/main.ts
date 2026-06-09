@@ -92,6 +92,8 @@ const modal = createModalController(
 
 const initialCodeFontScale = readInitialCodeFontScale();
 autoRunEl.checked = readStoredBoolean(autoRunStorageKey);
+tabsEl.setAttribute("role", "tablist");
+tabsEl.setAttribute("aria-label", "Open files");
 
 const editor = monaco.editor.create(editorHostEl, {
   automaticLayout: true,
@@ -155,6 +157,8 @@ const layoutController = createLayoutController({
   beforeResize: hideFileMenu
 });
 layoutController.attach();
+updateArgsPresetButtons();
+renderAssembly();
 void boot();
 
 async function boot(): Promise<void> {
@@ -205,6 +209,8 @@ compileEl.addEventListener("click", () => {
 });
 
 runEl.addEventListener("click", () => {
+  cancelPendingCompile();
+  invalidateToolRuns();
   void executeProgram();
 });
 
@@ -292,7 +298,10 @@ window.addEventListener("keydown", (event) => {
 
 filesEl.addEventListener("scroll", () => hideFileMenu());
 
-function openFile(path: string): void {
+function openFile(pathInput: string): void {
+  const canonicalPath = canonicalSourcePath(pathInput);
+  if (!canonicalPath) return;
+  const path = canonicalPath;
   const file = project.files.find((item) => item.path === path) ?? readOnlyFiles.get(path);
   if (!file) return;
   const readOnly = readOnlyFiles.has(path);
@@ -323,11 +332,13 @@ function openFile(path: string): void {
 
 function ensureOpenTab(path: string): void {
   pruneOpenTabs();
-  if (!openTabs.some((item) => pathsEqual(item, path))) openTabs.push(path);
+  const canonicalPath = canonicalSourcePath(path);
+  if (canonicalPath && !openTabs.some((item) => pathsEqual(item, canonicalPath))) openTabs.push(canonicalPath);
 }
 
-function closeTab(path: string): void {
+function closeTab(pathInput: string): void {
   pruneOpenTabs();
+  const path = canonicalSourcePath(pathInput) ?? pathInput;
   const index = openTabs.findIndex((item) => pathsEqual(item, path));
   if (index < 0) return;
 
@@ -343,6 +354,7 @@ function closeTab(path: string): void {
     model.dispose();
     models.delete(path);
   }
+  releaseReadOnlyFile(path);
 
   if (wasActive) {
     const nextPath = openTabs[index] ?? openTabs[index - 1];
@@ -359,7 +371,13 @@ function closeTab(path: string): void {
 }
 
 function pruneOpenTabs(): void {
-  openTabs = openTabs.filter((path) => sourcePathExists(path));
+  const canonicalTabs: string[] = [];
+  for (const path of openTabs) {
+    const canonicalPath = canonicalSourcePath(path);
+    if (!canonicalPath || canonicalTabs.some((item) => pathsEqual(item, canonicalPath))) continue;
+    canonicalTabs.push(canonicalPath);
+  }
+  openTabs = canonicalTabs;
 }
 
 function replaceOpenTabPath(oldPath: string, nextPath: string): void {
@@ -373,7 +391,7 @@ function removeOpenTabPath(path: string): void {
 }
 
 function sourcePathExists(path: string): boolean {
-  return project.files.some((file) => pathsEqual(file.path, path)) || readOnlyFiles.has(path);
+  return canonicalSourcePath(path) !== undefined;
 }
 
 function restoreOpenTabs(fallbackPath: string): void {
@@ -384,9 +402,8 @@ function restoreOpenTabs(fallbackPath: string): void {
   }
 
   openTabs = uniqueExistingPaths(stored.openTabs);
-  const activePath = sourcePathExists(stored.activeFile)
-    ? stored.activeFile
-    : openTabs.find((path) => sourcePathExists(path)) ?? "";
+  const storedActivePath = canonicalSourcePath(stored.activeFile);
+  const activePath = storedActivePath ?? openTabs.find((path) => sourcePathExists(path)) ?? "";
 
   if (!activePath) {
     if (sourcePathExists(fallbackPath)) {
@@ -407,7 +424,7 @@ function restoreOpenTabs(fallbackPath: string): void {
 function persistOpenTabs(): void {
   pruneOpenTabs();
   const editableTabs = openTabs.filter((path) => sourcePathExists(path) && !readOnlyFiles.has(path));
-  const activePath = activeEditorPath();
+  const activePath = canonicalSourcePath(activeEditorPath()) ?? activeEditorPath();
   writeStoredOpenTabs(openTabsStorageKey, {
     openTabs: editableTabs,
     activeFile: readOnlyFiles.has(activePath) ? project.activeFile : activePath
@@ -417,11 +434,35 @@ function persistOpenTabs(): void {
 function uniqueExistingPaths(paths: string[]): string[] {
   const result: string[] = [];
   for (const path of paths) {
-    if (!sourcePathExists(path)) continue;
-    if (result.some((item) => pathsEqual(item, path))) continue;
-    result.push(path);
+    const canonicalPath = canonicalSourcePath(path);
+    if (!canonicalPath) continue;
+    if (result.some((item) => pathsEqual(item, canonicalPath))) continue;
+    result.push(canonicalPath);
   }
   return result;
+}
+
+function canonicalSourcePath(path: string): string | undefined {
+  const normalizedPath = normalizeProjectPath(path);
+  const projectFile = project.files.find((file) => pathsEqual(file.path, normalizedPath));
+  if (projectFile) return projectFile.path;
+  for (const readOnlyPath of readOnlyFiles.keys()) {
+    if (pathsEqual(readOnlyPath, normalizedPath)) return readOnlyPath;
+  }
+  return undefined;
+}
+
+function releaseReadOnlyFile(path: string): void {
+  const canonicalPath = canonicalSourcePath(path);
+  if (!canonicalPath || !readOnlyFiles.has(canonicalPath)) return;
+  const stillOpen = openTabs.some((item) => pathsEqual(item, canonicalPath));
+  const stillModeled = [...models.keys()].some((item) => pathsEqual(item, canonicalPath));
+  if (stillOpen || stillModeled) return;
+
+  readOnlyFiles.delete(canonicalPath);
+  for (const [uri, itemPath] of readOnlyByUri) {
+    if (pathsEqual(itemPath, canonicalPath)) readOnlyByUri.delete(uri);
+  }
 }
 
 function activeEditorPath(): string {
@@ -585,8 +626,6 @@ function renderTabs(): void {
   for (const path of openTabs) {
     const tab = document.createElement("div");
     tab.className = pathsEqual(path, activePath) ? "tab active" : "tab";
-    tab.setAttribute("role", "tab");
-    tab.setAttribute("aria-selected", String(pathsEqual(path, activePath)));
     tab.title = path;
     tab.addEventListener("auxclick", (event) => {
       if (event.button === 1) {
@@ -598,7 +637,10 @@ function renderTabs(): void {
     const selectButton = document.createElement("button");
     selectButton.type = "button";
     selectButton.className = "tab-label";
+    selectButton.setAttribute("role", "tab");
+    selectButton.setAttribute("aria-selected", String(pathsEqual(path, activePath)));
     selectButton.setAttribute("aria-label", `Open ${path}`);
+    selectButton.tabIndex = pathsEqual(path, activePath) ? 0 : -1;
     selectButton.addEventListener("click", () => openFile(path));
 
     const icon = document.createElement("span");
@@ -766,9 +808,13 @@ function scheduleCompile(): void {
   }, 600);
 }
 
-async function runCompile(revision = toolRunRevision): Promise<void> {
+function cancelPendingCompile(): void {
   window.clearTimeout(compileTimer);
   compileTimer = undefined;
+}
+
+async function runCompile(revision = toolRunRevision): Promise<void> {
+  cancelPendingCompile();
   if (!project.activeFile.endsWith(".c")) {
     clearTransientOutputs("");
     statusEl.textContent = "Open a .c file to compile";
@@ -964,8 +1010,12 @@ function setCompilerArgs(value: string): void {
 
 function updateArgsPresetButtons(): void {
   const value = compilerArgsEl.value.trim();
-  argsWindowsEl.classList.toggle("active", value === windowsDefaultCompilerArgs);
-  argsCsappEl.classList.toggle("active", value === linuxDefaultCompilerArgs);
+  const windowsActive = value === windowsDefaultCompilerArgs;
+  const csappActive = value === linuxDefaultCompilerArgs;
+  argsWindowsEl.classList.toggle("active", windowsActive);
+  argsWindowsEl.setAttribute("aria-pressed", String(windowsActive));
+  argsCsappEl.classList.toggle("active", csappActive);
+  argsCsappEl.setAttribute("aria-pressed", String(csappActive));
 }
 
 function setDiagnostics(text: string): void {
@@ -986,8 +1036,12 @@ function renderConsole(): void {
 }
 
 function renderAssembly(): void {
-  asmCsappEl.classList.toggle("active", asmView === "csapp");
-  asmRawEl.classList.toggle("active", asmView === "raw");
+  const csappActive = asmView === "csapp";
+  const rawActive = asmView === "raw";
+  asmCsappEl.classList.toggle("active", csappActive);
+  asmCsappEl.setAttribute("aria-pressed", String(csappActive));
+  asmRawEl.classList.toggle("active", rawActive);
+  asmRawEl.setAttribute("aria-pressed", String(rawActive));
   const text = asmView === "csapp" ? simplifyAssembly(latestAsm) : latestAsm;
   asmEl.innerHTML = highlightAssembly(text);
 }

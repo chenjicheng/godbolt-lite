@@ -150,7 +150,25 @@ export function semanticTokenLegendValues(value: unknown, fallback: string[]): s
 }
 
 export function semanticTokenDataValues(value: unknown, maxValues: number): Uint32Array {
-  return new Uint32Array(Array.isArray(value) ? value.filter(isNumber).slice(0, maxValues) : []);
+  if (!Array.isArray(value)) {
+    return new Uint32Array();
+  }
+
+  const cappedLength = Math.min(value.length, Math.max(0, Math.floor(maxValues)));
+  const completeLength = cappedLength - (cappedLength % 5);
+  if (completeLength === 0) {
+    return new Uint32Array();
+  }
+
+  const data = new Uint32Array(completeLength);
+  for (let index = 0; index < completeLength; index += 1) {
+    const tokenValue = value[index];
+    if (!isUint32Value(tokenValue)) {
+      return new Uint32Array();
+    }
+    data[index] = tokenValue;
+  }
+  return data;
 }
 
 function lspRangeToMonaco(monaco: MonacoApi, value: unknown): Monaco.Range | undefined {
@@ -268,6 +286,6 @@ function isString(value: unknown): value is string {
   return typeof value === "string";
 }
 
-function isNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
+function isUint32Value(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 }

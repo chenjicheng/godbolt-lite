@@ -49,6 +49,7 @@ const owner = "lsp";
 const reconnectDelayMs = 1500;
 const requestTimeoutMs = 10000;
 const maxLspClientPayloadBytes = 8 << 20;
+const maxLspDocumentTextLength = maxLspClientPayloadBytes;
 const maxSemanticTokenValues = 250000;
 const textEncoder = new TextEncoder();
 
@@ -211,7 +212,6 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
-
     sendJsonMessage({
       jsonrpc: "2.0",
       method,
@@ -253,16 +253,20 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
+    if (!canSendDocumentText(uri, model)) {
+      return;
+    }
+
     const message: JsonRpcMessage = {
       jsonrpc: "2.0",
       method: "textDocument/didOpen",
       params: {
-      textDocument: {
-        uri,
-        languageId,
-        version: model.getVersionId(),
-        text: model.getValue()
-      }
+        textDocument: {
+          uri,
+          languageId,
+          version: model.getVersionId(),
+          text: model.getValue()
+        }
       }
     };
     if (!sendDocumentMessage(uri, model, message)) {
@@ -298,23 +302,41 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       return;
     }
 
+    if (!canSendDocumentText(uri, model)) {
+      closeDocument(uri);
+      return;
+    }
+
     const message: JsonRpcMessage = {
       jsonrpc: "2.0",
       method: "textDocument/didChange",
       params: {
-      textDocument: {
-        uri,
-        version: model.getVersionId()
-      },
-      contentChanges: [{ text: model.getValue() }]
+        textDocument: {
+          uri,
+          version: model.getVersionId()
+        },
+        contentChanges: [{ text: model.getValue() }]
       }
     };
     if (!sendDocumentMessage(uri, model, message)) {
-      sendNotification("textDocument/didClose", {
-        textDocument: { uri }
-      });
-      openedUris.delete(uri);
+      closeDocument(uri);
     }
+  }
+
+  function canSendDocumentText(uri: string, model: Model): boolean {
+    if (model.getValueLength() <= maxLspDocumentTextLength) {
+      return true;
+    }
+    markOversizedDocument(uri, model);
+    return false;
+  }
+
+  function closeDocument(uri: string): void {
+    if (!openedUris.has(uri)) return;
+    sendNotification("textDocument/didClose", {
+      textDocument: { uri }
+    });
+    openedUris.delete(uri);
   }
 
   function sendDocumentMessage(uri: string, model: Model, message: JsonRpcMessage): boolean {
@@ -324,10 +346,14 @@ export function attachLspClient(options: LspClientOptions): LspHandle {
       }
       return true;
     }
+    markOversizedDocument(uri, model);
+    return false;
+  }
+
+  function markOversizedDocument(uri: string, model: Model): void {
     oversizedUris.add(uri);
     monaco.editor.setModelMarkers(model, owner, []);
     onStatus("LSP disabled for oversized file");
-    return false;
   }
 
   function applyDiagnostics(params: unknown) {
