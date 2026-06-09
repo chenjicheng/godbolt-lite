@@ -85,13 +85,14 @@ function New-ToolchainZip {
     $sourceRoot = (Resolve-Path $SourceDir).Path.TrimEnd([char[]]@("\", "/"))
     $zip = [System.IO.Compression.ZipFile]::Open($DestinationPath, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
+        $deterministicTimestamp = [DateTimeOffset]::Parse("1980-01-01T00:00:00Z")
         $files = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
             Sort-Object @{ Expression = { $_.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/") } }
         foreach ($file in $files) {
             $entryName = $file.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
             Assert-ArchiveEntryNameSafe $entryName
             $entry = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
-            $entry.LastWriteTime = [DateTimeOffset]::FromUnixTimeSeconds(0)
+            $entry.LastWriteTime = $deterministicTimestamp
             $src = [System.IO.File]::OpenRead($file.FullName)
             $dst = $entry.Open()
             try {
