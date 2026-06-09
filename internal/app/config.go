@@ -13,7 +13,6 @@ type Config struct {
 	OpenURL          bool
 	ExeDir           string
 	ProjectDir       string
-	IncludeDir       string
 	SystemIncludeDir string
 	CacheDir         string
 }
@@ -39,7 +38,6 @@ func DefaultConfig() (Config, error) {
 		OpenURL:    true,
 		ExeDir:     exeDir,
 		ProjectDir: filepath.Join(desktopDir(home), "mini-godbolt-project"),
-		IncludeDir: filepath.Join(exeDir, "include"),
 		CacheDir:   filepath.Join(cacheBase, appName),
 	}, nil
 }

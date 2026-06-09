@@ -49,11 +49,10 @@ type Compiler struct {
 	clang            string
 	lldLink          string
 	projectDir       string
-	includeDir       string
 	systemIncludeDir string
 }
 
-func NewCompiler(clang, projectDir, includeDir, systemIncludeDir string) *Compiler {
+func NewCompiler(clang, projectDir, systemIncludeDir string) *Compiler {
 	lldLink := ""
 	if clang != "" {
 		candidate := exeName(filepath.Join(filepath.Dir(clang), "lld-link"))
@@ -63,7 +62,7 @@ func NewCompiler(clang, projectDir, includeDir, systemIncludeDir string) *Compil
 			lldLink = found
 		}
 	}
-	return &Compiler{clang: clang, lldLink: lldLink, projectDir: projectDir, includeDir: includeDir, systemIncludeDir: systemIncludeDir}
+	return &Compiler{clang: clang, lldLink: lldLink, projectDir: projectDir, systemIncludeDir: systemIncludeDir}
 }
 
 func (c *Compiler) Compile(ctx context.Context, req CompileRequest) CompileResponse {
@@ -300,7 +299,6 @@ func (c *Compiler) baseCompileArgs() []string {
 		"-std=c17",
 		"-isystem", absPath(c.systemIncludeDir),
 		"-I", absPath(c.projectDir),
-		"-I", absPath(c.includeDir),
 	}
 }
 

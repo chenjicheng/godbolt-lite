@@ -66,22 +66,6 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 		}, nil
 	}
 
-	if rel, ok := pathRelIfInside(s.cfg.IncludeDir, absPath); ok {
-		if err := validateReadableSourceRel(rel); err != nil {
-			return SourceReadResponse{}, err
-		}
-		data, err := readRegularSourceFile(absPath)
-		if err != nil {
-			return SourceReadResponse{}, err
-		}
-		return SourceReadResponse{
-			URI:      uri,
-			Path:     "external/include/" + filepath.ToSlash(rel),
-			Content:  string(data),
-			ReadOnly: true,
-		}, nil
-	}
-
 	if rel, ok := pathRelIfInside(s.cfg.SystemIncludeDir, absPath); ok {
 		if err := validateReadableSourceRel(rel); err != nil {
 			return SourceReadResponse{}, err

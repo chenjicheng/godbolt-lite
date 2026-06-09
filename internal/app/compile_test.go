@@ -10,7 +10,7 @@ import (
 )
 
 func TestCompileWithoutClangReturnsStructuredError(t *testing.T) {
-	compiler := NewCompiler("", t.TempDir(), t.TempDir(), t.TempDir())
+	compiler := NewCompiler("", t.TempDir(), t.TempDir())
 	resp := compiler.Compile(context.Background(), CompileRequest{
 		ActiveFile: "main.c",
 		RequestID:  "req-1",
@@ -70,10 +70,9 @@ func TestPrepareRunCompilerArgsRejectsAssemblyOnlyMode(t *testing.T) {
 
 func TestValidateCompilerArgsRejectsUnsafeInputs(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	outsideDir := t.TempDir()
-	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
 
 	cases := [][]string{
 		{"scratch.c"},
@@ -101,9 +100,8 @@ func TestValidateCompilerArgsRejectsUnsafeInputs(t *testing.T) {
 
 func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
-	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
 
 	args := []string{
 		"-Og",
@@ -122,13 +120,12 @@ func TestValidateCompilerArgsAllowsCommonSafeArgs(t *testing.T) {
 
 func TestSanitizeCompilerArgsNormalizesRelativePathArgs(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
-	vendorDir := filepath.Join(includeDir, "vendor")
+	vendorDir := filepath.Join(projectDir, "vendor")
 	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
 
 	args, err := compiler.sanitizeCompilerArgs([]string{"-I", "vendor"})
 	if err != nil {
@@ -144,14 +141,13 @@ func TestSanitizeCompilerArgsNormalizesRelativePathArgs(t *testing.T) {
 
 func TestRunSourcePathsFollowsLocalHeaderImplementations(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	writeTestFile(t, projectDir, "main.c", "#include \"util.h\"\n#include <stdio.h>\nint main(void){return add(1, 2);}\n")
 	writeTestFile(t, projectDir, "util.h", "int add(int, int);\n")
 	writeTestFile(t, projectDir, "util.c", "#include \"util.h\"\nint add(int a, int b){return a + b;}\n")
 	writeTestFile(t, projectDir, "scratch.c", "int main(void){return 99;}\n")
 
-	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
 	mainPath := filepath.Join(projectDir, "main.c")
 	utilPath := filepath.Join(projectDir, "util.c")
 	utilHeader := filepath.Join(projectDir, "util.h")
@@ -166,19 +162,18 @@ func TestRunSourcePathsFollowsLocalHeaderImplementations(t *testing.T) {
 	assertNotRunSource(t, paths, projectDir, "scratch.c")
 }
 
-func TestRunSourcePathsFollowsIncludeFolderHeaderImplementations(t *testing.T) {
+func TestRunSourcePathsFollowsProjectVendorHeaderImplementations(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	writeTestFile(t, projectDir, "main.c", "#include \"vendor/foo.h\"\nint main(void){return foo();}\n")
-	writeTestFile(t, includeDir, "vendor/foo.h", "int foo(void);\n")
-	writeTestFile(t, includeDir, "vendor/foo.c", "#include \"foo.h\"\nint foo(void){return 7;}\n")
-	writeTestFile(t, includeDir, "vendor/unused.c", "int unused(void){return 1;}\n")
+	writeTestFile(t, projectDir, "vendor/foo.h", "int foo(void);\n")
+	writeTestFile(t, projectDir, "vendor/foo.c", "#include \"foo.h\"\nint foo(void){return 7;}\n")
+	writeTestFile(t, projectDir, "vendor/unused.c", "int unused(void){return 1;}\n")
 
-	compiler := NewCompiler("clang", projectDir, includeDir, systemIncludeDir)
+	compiler := NewCompiler("clang", projectDir, systemIncludeDir)
 	mainPath := filepath.Join(projectDir, "main.c")
-	fooHeader := filepath.Join(includeDir, "vendor", "foo.h")
-	fooSource := filepath.Join(includeDir, "vendor", "foo.c")
+	fooHeader := filepath.Join(projectDir, "vendor", "foo.h")
+	fooSource := filepath.Join(projectDir, "vendor", "foo.c")
 	paths, err := compiler.discoverRunSourcePaths(context.Background(), mainPath, fakeDependencyReader(map[string][]string{
 		mainPath:  {mainPath, fooHeader},
 		fooSource: {fooSource, fooHeader},
@@ -186,9 +181,8 @@ func TestRunSourcePathsFollowsIncludeFolderHeaderImplementations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runSourcePaths failed: %v", err)
 	}
-	assertRunSources(t, paths, projectDir, "main.c")
-	assertRunSources(t, paths, includeDir, "vendor/foo.c")
-	assertNotRunSource(t, paths, includeDir, "vendor/unused.c")
+	assertRunSources(t, paths, projectDir, "main.c", "vendor/foo.c")
+	assertNotRunSource(t, paths, projectDir, "vendor/unused.c")
 }
 
 func TestRunArtifactPrefixSanitizesRequestID(t *testing.T) {

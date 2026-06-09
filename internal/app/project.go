@@ -26,26 +26,22 @@ type ProjectState struct {
 }
 
 const (
-	maxProjectFiles              = 128
-	maxProjectFileBytes          = 512 << 10
-	maxProjectTotalBytes         = 2 << 20
-	maxCompilerArgsBytes         = 8 << 10
-	maxIncludeSourceCommandFiles = 512
+	maxProjectFiles      = 128
+	maxProjectFileBytes  = 512 << 10
+	maxProjectTotalBytes = 2 << 20
+	maxCompilerArgsBytes = 8 << 10
 )
-
-var errIncludeSourceCommandLimit = errors.New("include source command limit reached")
 
 type ProjectStore struct {
 	dir              string
-	includeDir       string
 	systemIncludeDir string
 	clangPath        string
 	mu               sync.Mutex
 	state            ProjectState
 }
 
-func NewProjectStore(dir, includeDir, systemIncludeDir, clangPath string) *ProjectStore {
-	return &ProjectStore{dir: dir, includeDir: includeDir, systemIncludeDir: systemIncludeDir, clangPath: clangPath}
+func NewProjectStore(dir, systemIncludeDir, clangPath string) *ProjectStore {
+	return &ProjectStore{dir: dir, systemIncludeDir: systemIncludeDir, clangPath: clangPath}
 }
 
 func (p *ProjectStore) Load() (ProjectState, error) {
@@ -197,11 +193,6 @@ func (p *ProjectStore) compileCommandsJSONLocked(state ProjectState, compilerArg
 			commands = append(commands, p.compileCommandFor(absFile, compilerArgs))
 		}
 	}
-	includeEntries, err := p.includeSourceCommands(compilerArgs)
-	if err != nil {
-		return nil, err
-	}
-	commands = append(commands, includeEntries...)
 	out, err := json.MarshalIndent(commands, "", "  ")
 	if err != nil {
 		return nil, err
@@ -210,53 +201,8 @@ func (p *ProjectStore) compileCommandsJSONLocked(state ProjectState, compilerArg
 }
 
 func (p *ProjectStore) compilerArgsForState(state ProjectState) ([]string, error) {
-	compiler := NewCompiler(p.clangPath, p.dir, p.includeDir, p.systemIncludeDir)
+	compiler := NewCompiler(p.clangPath, p.dir, p.systemIncludeDir)
 	return compiler.compilerArgsFromString(state.CompilerArgs)
-}
-
-func (p *ProjectStore) includeSourceCommands(compilerArgs []string) ([]commandEntry, error) {
-	var commands []commandEntry
-	info, err := os.Stat(p.includeDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if !info.IsDir() {
-		return nil, nil
-	}
-	err = filepath.WalkDir(p.includeDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		mode := info.Mode()
-		if mode&os.ModeSymlink != 0 || mode&os.ModeIrregular != 0 {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if !mode.IsRegular() || !strings.EqualFold(filepath.Ext(path), ".c") {
-			return nil
-		}
-		if len(commands) >= maxIncludeSourceCommandFiles {
-			return errIncludeSourceCommandLimit
-		}
-		commands = append(commands, p.compileCommandFor(path, compilerArgs))
-		return nil
-	})
-	if errors.Is(err, errIncludeSourceCommandLimit) {
-		return commands, nil
-	}
-	return commands, err
 }
 
 type commandEntry struct {
@@ -272,7 +218,6 @@ func (p *ProjectStore) compileCommandFor(absFile string, compilerArgs []string) 
 		"-std=c17",
 		"-isystem", p.systemIncludeDir,
 		"-I", p.dir,
-		"-I", p.includeDir,
 	}
 	args = append(args, compilerArgs...)
 	args = append(args,

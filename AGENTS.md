@@ -20,7 +20,7 @@ Runtime model:
 
 - The app starts a local HTTP server on `127.0.0.1`.
 - Project files live in a project directory, defaulting to the desktop path in normal runtime.
-- Third-party headers and source files are read from `include/` next to the exe.
+- Third-party headers and source files are project files under the project directory; the app does not read a separate exe-adjacent `include/` folder.
 - Built-in C17 declaration stubs are extracted into the cache and passed with `-isystem`.
 - Toolchain discovery order is sidecar `toolchain/`, cached embedded zip extraction, embedded zip extraction, then `PATH`.
 - The frontend is built into `internal/app/static`, then embedded by Go into `dist/mini-godbolt.exe`.
@@ -92,7 +92,7 @@ Important backend endpoints:
    - Move `dist\toolchain` aside before `scripts/build.ps1 -Release`; release validation rejects sidecar toolchains so embedded LLVM cannot be masked.
    - Run `scripts/build.ps1 -Release`.
    - Confirm the release smoke test uses the embedded cache toolchain, starts `clang.exe`, `clangd.exe`, and `lld-link.exe`, serves the rebuilt UI, verifies clang resource headers, and compiles the default project.
-   - Confirm `dist/include` contains any intended third-party files copied from root `include/`.
+   - Confirm any intended third-party headers and source files are part of the project tree.
 
 6. Git Hygiene
    - Run `git status --short` before and after edits.
@@ -117,7 +117,7 @@ Scope:
 Questions:
 
 - Can user-controlled project paths escape the project root?
-- Can `include/` or embedded toolchain extraction escape allowed roots?
+- Can project file writes, source reads, or embedded toolchain extraction escape allowed roots?
 - Are compiler arguments split safely and passed as argv, not shell text?
 - Are compile/run timeouts, output limits, and executable cleanup sufficient?
 - Does multi-file run discovery include intended implementation files without pulling unrelated scratch files?

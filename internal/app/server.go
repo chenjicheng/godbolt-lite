@@ -47,7 +47,6 @@ func Run(ctx context.Context, args []string) error {
 		return nil
 	})
 	flags.StringVar(&cfg.ProjectDir, "project-dir", cfg.ProjectDir, "project workspace directory")
-	flags.StringVar(&cfg.IncludeDir, "include-dir", cfg.IncludeDir, "third-party include/source directory")
 	flags.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "toolchain cache directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -77,7 +76,6 @@ func Run(ctx context.Context, args []string) error {
 	url := "http://" + listener.Addr().String()
 	log.Printf("mini-godbolt listening on %s", url)
 	log.Printf("project folder: %s", cfg.ProjectDir)
-	log.Printf("third-party include folder: %s", cfg.IncludeDir)
 	log.Printf("system include folder: %s", cfg.SystemIncludeDir)
 	if srv.toolchainErr != nil {
 		log.Printf("toolchain unavailable: %v", srv.toolchainErr)
@@ -111,13 +109,13 @@ func NewServer(cfg Config) *Server {
 	if clangPath == "" {
 		clangPath = "clang"
 	}
-	project := NewProjectStore(cfg.ProjectDir, cfg.IncludeDir, cfg.SystemIncludeDir, clangPath)
+	project := NewProjectStore(cfg.ProjectDir, cfg.SystemIncludeDir, clangPath)
 	return &Server{
 		cfg:          cfg,
 		toolchain:    tc,
 		toolchainErr: err,
 		project:      project,
-		compiler:     NewCompiler(tc.Clang, cfg.ProjectDir, cfg.IncludeDir, cfg.SystemIncludeDir),
+		compiler:     NewCompiler(tc.Clang, cfg.ProjectDir, cfg.SystemIncludeDir),
 		lspSlots:     make(chan struct{}, 2),
 	}
 }
@@ -138,7 +136,6 @@ func (s *Server) routes() http.Handler {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"projectDir":       s.cfg.ProjectDir,
-		"includeDir":       s.cfg.IncludeDir,
 		"systemIncludeDir": s.cfg.SystemIncludeDir,
 		"cacheDir":         s.cfg.CacheDir,
 		"toolchain":        s.toolchainStatus(),

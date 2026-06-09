@@ -24,11 +24,29 @@ export function mountAppShell(app: HTMLDivElement): void {
         <div id="status" class="status">Starting</div>
       </header>
       <div id="workspace" class="workspace">
-        <aside class="sidebar">
-          <div class="sidebar-actions">
-            <button id="new-file" type="button">+ File</button>
+        <aside class="sidebar" aria-label="Explorer">
+          <div class="explorer-titlebar">
+            <span>EXPLORER</span>
+            <div class="explorer-actions" aria-label="Explorer actions">
+              <button id="new-file" class="icon-button" type="button" title="New File" aria-label="New File">
+                <vscode-icon name="new-file"></vscode-icon>
+              </button>
+              <button id="new-folder" class="icon-button" type="button" title="New Folder" aria-label="New Folder">
+                <vscode-icon name="new-folder"></vscode-icon>
+              </button>
+              <button id="collapse-folders" class="icon-button" type="button" title="Collapse All" aria-label="Collapse All">
+                <vscode-icon name="collapse-all"></vscode-icon>
+              </button>
+            </div>
           </div>
-          <div id="files" class="file-list"></div>
+          <div class="explorer-section open-editors-section">
+            <div class="explorer-section-title">OPEN EDITORS</div>
+            <div id="open-editors" class="open-editors"></div>
+          </div>
+          <div class="explorer-section project-section">
+            <div class="explorer-section-title">PROJECT</div>
+            <vscode-tree id="files" class="file-tree" aria-label="Project files"></vscode-tree>
+          </div>
         </aside>
         <div id="sidebar-resizer" class="layout-resizer layout-resizer-vertical"></div>
         <section class="editor-pane">
@@ -52,6 +70,9 @@ export function mountAppShell(app: HTMLDivElement): void {
       </div>
       <footer id="meta" class="meta"></footer>
       <div id="file-menu" class="context-menu" hidden>
+        <button id="file-menu-new-file" type="button"><span>New File</span></button>
+        <button id="file-menu-new-folder" type="button"><span>New Folder</span></button>
+        <div class="context-menu-separator" role="separator"></div>
         <button id="file-menu-rename" type="button"><span>Rename</span><kbd>F2</kbd></button>
         <button id="file-menu-delete" type="button" class="danger"><span>Delete</span><kbd>Del</kbd></button>
       </div>

@@ -21,15 +21,8 @@ func TestCleanProjectPathRejectsTraversal(t *testing.T) {
 
 func TestProjectStoreSyncWritesFilesAndCompileCommands(t *testing.T) {
 	dir := t.TempDir()
-	includeDir := filepath.Join(dir, "include")
-	if err := os.MkdirAll(filepath.Join(includeDir, "vendor"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(includeDir, "vendor", "foo.c"), []byte("int foo(void){return 1;}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	systemIncludeDir := filepath.Join(dir, "system-include")
-	store := NewProjectStore(dir, includeDir, systemIncludeDir, "clang")
+	store := NewProjectStore(dir, systemIncludeDir, "clang")
 	state := ProjectState{
 		ActiveFile: "main.c",
 		Files: []ProjectFile{
@@ -61,16 +54,18 @@ func TestProjectStoreSyncWritesFilesAndCompileCommands(t *testing.T) {
 	text := commandText.String()
 	if !strings.Contains(text, "main.c") ||
 		!strings.Contains(text, "nested") ||
-		!strings.Contains(text, "vendor") ||
 		!strings.Contains(text, "-isystem") ||
 		!strings.Contains(text, systemIncludeDir) {
 		t.Fatalf("compile_commands.json missing expected entries: %s", text)
+	}
+	if strings.Contains(text, "vendor") {
+		t.Fatalf("compile_commands.json included non-project vendor entries: %s", text)
 	}
 }
 
 func TestProjectStoreRejectsUnsafeCompilerArgsForCompileCommands(t *testing.T) {
 	dir := t.TempDir()
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 	state := ProjectState{
 		ActiveFile:   "main.c",
 		CompilerArgs: "-Xclang -load",
@@ -89,7 +84,7 @@ func TestProjectStoreRejectsUnsafeCompilerArgsForCompileCommands(t *testing.T) {
 
 func TestProjectStoreSyncRejectsEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 	if err := store.Sync(ProjectState{Files: []ProjectFile{{
 		Path:    "main.c",
 		Content: "int main(void){return 0;}\n",
@@ -107,7 +102,7 @@ func TestProjectStoreSyncRejectsEmptyFiles(t *testing.T) {
 
 func TestProjectStoreSyncWritesBeforeDeletingOldFiles(t *testing.T) {
 	dir := t.TempDir()
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 	if err := store.Sync(ProjectState{Files: []ProjectFile{{
 		Path:    "old.c",
 		Content: "int old(void){return 1;}\n",
@@ -132,7 +127,7 @@ func TestProjectStoreSyncWritesBeforeDeletingOldFiles(t *testing.T) {
 
 func TestProjectStoreSyncCaseOnlyRenameKeepsFile(t *testing.T) {
 	dir := t.TempDir()
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 	if err := store.Sync(ProjectState{Files: []ProjectFile{{
 		Path:    "main.c",
 		Content: "int old(void){return 1;}\n",
@@ -213,12 +208,11 @@ func TestNormalizeStateRejectsProjectLimits(t *testing.T) {
 
 func TestProjectStoreCompileCommandsUseNormalizedCompilerArgPaths(t *testing.T) {
 	dir := t.TempDir()
-	includeDir := filepath.Join(dir, "include")
-	vendorDir := filepath.Join(includeDir, "vendor")
+	vendorDir := filepath.Join(dir, "vendor")
 	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 	state := ProjectState{
 		ActiveFile:   "main.c",
 		CompilerArgs: "-I vendor",
@@ -296,7 +290,7 @@ func TestNormalizeStateMigratesDefaultCompilerArgs(t *testing.T) {
 
 func TestProjectStoreSyncRemovesDeletedFiles(t *testing.T) {
 	dir := t.TempDir()
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "clang")
 
 	first := ProjectState{
 		ActiveFile: "main.c",
@@ -343,7 +337,7 @@ func TestProjectStoreLoadRefreshesCompileCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "new-clang")
+	store := NewProjectStore(dir, filepath.Join(dir, "system-include"), "new-clang")
 	if _, err := store.Load(); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -353,47 +347,5 @@ func TestProjectStoreLoadRefreshesCompileCommands(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "new-clang") || strings.Contains(string(data), "stale") {
 		t.Fatalf("compile_commands.json was not refreshed: %s", string(data))
-	}
-}
-
-func TestIncludeSourceCommandsCapsSourceFiles(t *testing.T) {
-	dir := t.TempDir()
-	includeDir := filepath.Join(dir, "include")
-	for i := 0; i < maxIncludeSourceCommandFiles+3; i++ {
-		writeTestFile(t, includeDir, fmt.Sprintf("file%03d.c", i), "int value(void){return 1;}\n")
-	}
-	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
-
-	commands, err := store.includeSourceCommands(nil)
-	if err != nil {
-		t.Fatalf("includeSourceCommands failed: %v", err)
-	}
-	if len(commands) != maxIncludeSourceCommandFiles {
-		t.Fatalf("include source command count = %d, want %d", len(commands), maxIncludeSourceCommandFiles)
-	}
-}
-
-func TestIncludeSourceCommandsSkipsSymlinkSources(t *testing.T) {
-	dir := t.TempDir()
-	includeDir := filepath.Join(dir, "include")
-	outsideDir := t.TempDir()
-	writeTestFile(t, includeDir, "real.c", "int real(void){return 1;}\n")
-	writeTestFile(t, outsideDir, "linked.c", "int linked(void){return 2;}\n")
-	if err := os.Symlink(filepath.Join(outsideDir, "linked.c"), filepath.Join(includeDir, "linked.c")); err != nil {
-		t.Skipf("Symlink not available: %v", err)
-	}
-	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
-
-	commands, err := store.includeSourceCommands(nil)
-	if err != nil {
-		t.Fatalf("includeSourceCommands failed: %v", err)
-	}
-	for _, command := range commands {
-		if strings.EqualFold(filepath.Base(command.File), "linked.c") {
-			t.Fatalf("includeSourceCommands included symlink source: %#v", commands)
-		}
-	}
-	if len(commands) != 1 || !strings.EqualFold(filepath.Base(commands[0].File), "real.c") {
-		t.Fatalf("includeSourceCommands = %#v, want only real.c", commands)
 	}
 }

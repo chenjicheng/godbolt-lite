@@ -20,13 +20,11 @@ func TestFileURIToPathWindowsDrive(t *testing.T) {
 
 func TestReadAllowedSourceAllowsSystemIncludes(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	writeTestFile(t, systemIncludeDir, "stdio.h", "int printf(const char *, ...);\n")
 
 	server := &Server{cfg: Config{
 		ProjectDir:       projectDir,
-		IncludeDir:       includeDir,
 		SystemIncludeDir: systemIncludeDir,
 	}}
 	path := filepath.Join(systemIncludeDir, "stdio.h")
@@ -44,13 +42,11 @@ func TestReadAllowedSourceAllowsSystemIncludes(t *testing.T) {
 
 func TestReadAllowedSourceAllowsIncFiles(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	writeTestFile(t, projectDir, "macros.inc", "#define VALUE 1\n")
 
 	server := &Server{cfg: Config{
 		ProjectDir:       projectDir,
-		IncludeDir:       includeDir,
 		SystemIncludeDir: systemIncludeDir,
 	}}
 	path := filepath.Join(projectDir, "macros.inc")
@@ -65,11 +61,9 @@ func TestReadAllowedSourceAllowsIncFiles(t *testing.T) {
 
 func TestReadAllowedSourceRejectsMetadataNonSourceBinaryAndOversized(t *testing.T) {
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	server := &Server{cfg: Config{
 		ProjectDir:       projectDir,
-		IncludeDir:       includeDir,
 		SystemIncludeDir: systemIncludeDir,
 	}}
 	cases := []struct {
@@ -100,7 +94,6 @@ func TestReadAllowedSourceRejectsSymlinkEscape(t *testing.T) {
 		t.Skip("Windows symlink creation often needs developer mode or administrator rights")
 	}
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
 	outsideDir := t.TempDir()
 	writeTestFile(t, outsideDir, "secret.h", "int secret(void);\n")
@@ -111,7 +104,6 @@ func TestReadAllowedSourceRejectsSymlinkEscape(t *testing.T) {
 
 	server := &Server{cfg: Config{
 		ProjectDir:       projectDir,
-		IncludeDir:       includeDir,
 		SystemIncludeDir: systemIncludeDir,
 	}}
 	if _, err := server.readAllowedSource(pathToTestFileURI(linkPath), linkPath); err == nil {

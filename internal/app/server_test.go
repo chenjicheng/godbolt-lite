@@ -79,17 +79,15 @@ func TestCompileAndRunRejectOversizedCompilerArgs(t *testing.T) {
 func testServerForHandlers(t *testing.T) *Server {
 	t.Helper()
 	projectDir := t.TempDir()
-	includeDir := t.TempDir()
 	systemIncludeDir := t.TempDir()
-	store := NewProjectStore(projectDir, includeDir, systemIncludeDir, "clang")
+	store := NewProjectStore(projectDir, systemIncludeDir, "clang")
 	return &Server{
 		cfg: Config{
 			ProjectDir:       projectDir,
-			IncludeDir:       includeDir,
 			SystemIncludeDir: systemIncludeDir,
 		},
 		project:      store,
-		compiler:     NewCompiler("", projectDir, includeDir, systemIncludeDir),
+		compiler:     NewCompiler("", projectDir, systemIncludeDir),
 		toolchainErr: errors.New("toolchain unavailable"),
 	}
 }

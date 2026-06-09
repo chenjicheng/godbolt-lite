@@ -4,16 +4,11 @@
 
 ```text
 mini-godbolt.exe
-include/
-  vendor.h
-  vendor.c
 toolchain/ (optional sidecar)
   bin/clang.exe
   bin/clangd.exe
   bin/lld-link.exe
 ```
-
-The executable locates `include/` from `os.Executable()`, not from the process working directory.
 
 Browser-managed project files are stored in:
 
@@ -28,6 +23,8 @@ C17 standard-library header stubs are embedded in the executable and extracted t
 ```
 
 The project compile commands include that directory with `-isystem`, so clangd can complete standard headers and understand common libc declarations.
+
+Third-party headers and source files are normal project files. Vendor folders must be created under the browser-managed project tree; the executable does not scan an `include/` sidecar directory.
 
 ## Backend
 
@@ -44,7 +41,7 @@ The Go server exposes:
 `/api/compile` compiles the active `.c` file to assembly only. It does not link and does not run user code.
 The UI sends a free-form clang argument string; the server still appends `-S -o -` so assembly is returned to the page.
 
-`/api/run` links and executes the active program on the native Windows target. It derives the translation units from the active `.c` file and local quoted includes: a discovered `foo.h` pulls in sibling `foo.c` when present, but unrelated scratch `.c` files are left out. Linux `-target` flags are omitted for program execution because a Linux ABI binary cannot run directly on Windows.
+`/api/run` links and executes the active program on the native Windows target. It derives the translation units from the active `.c` file and project-local quoted includes: a discovered `foo.h` pulls in sibling `foo.c` when present, but unrelated scratch `.c` files are left out. Linux `-target` flags are omitted for program execution because a Linux ABI binary cannot run directly on Windows.
 
 `/api/lsp` upgrades to WebSocket through a maintained WebSocket library and bridges browser JSON-RPC messages to clangd's stdin/stdout LSP framing.
 

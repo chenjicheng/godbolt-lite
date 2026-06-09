@@ -12,6 +12,8 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@vscode-elements/elements": "^2.5.1",
+    "@vscode/codicons": "^0.0.45",
     "dompurify": "^3.4.0",
     "monaco-editor": "^0.55.1"
   },

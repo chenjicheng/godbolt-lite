@@ -197,12 +197,6 @@ if (-not (Test-Path ".\internal\app\static\index.html")) {
 }
 New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
 go build -trimpath -ldflags="-s -w" -o ".\dist\mini-godbolt.exe" .\cmd\mini-godbolt
-Remove-DirectoryInsideRoot -BaseDir $root -Path ".\dist\include"
-New-Item -ItemType Directory -Force -Path ".\dist\include" | Out-Null
-
-if (Test-Path ".\include") {
-    Copy-DirectoryContentsInsideRoot -BaseDir $root -SourceDir ".\include" -DestinationDir ".\dist\include"
-}
 
 if ($Release) {
     Assert-ReleaseSmoke

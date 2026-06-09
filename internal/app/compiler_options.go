@@ -233,7 +233,7 @@ func (c *Compiler) normalizeCompilerArgPath(flag, value string) (string, error) 
 	if fallback != "" {
 		return fallback, nil
 	}
-	return "", fmt.Errorf("%s path %q must stay inside the project, include, or system include folders", flag, value)
+	return "", fmt.Errorf("%s path %q must stay inside the project or system include folders", flag, value)
 }
 
 type compilerArgPathCandidate struct {
@@ -241,7 +241,7 @@ type compilerArgPathCandidate struct {
 }
 
 func (c *Compiler) allowedCompilerArgRoots() []string {
-	return []string{c.projectDir, c.includeDir, c.systemIncludeDir}
+	return []string{c.projectDir, c.systemIncludeDir}
 }
 
 func looksLikePath(value string) bool {

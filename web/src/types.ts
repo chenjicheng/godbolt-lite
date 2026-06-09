@@ -32,7 +32,6 @@ export type RunResponse = {
 
 export type StatusResponse = {
   projectDir: string;
-  includeDir: string;
   systemIncludeDir: string;
   cacheDir: string;
   toolchain: string;

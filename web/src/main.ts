@@ -1,6 +1,13 @@
 import * as monaco from "monaco-editor";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import "@vscode-elements/elements/dist/vscode-icon/index.js";
+import "@vscode-elements/elements/dist/vscode-tree/index.js";
+import "@vscode-elements/elements/dist/vscode-tree-item/index.js";
+import codiconStylesHref from "@vscode/codicons/dist/codicon.css?url";
+import type { VscodeIcon } from "@vscode-elements/elements/dist/vscode-icon";
+import type { VscodeTree } from "@vscode-elements/elements/dist/vscode-tree";
+import type { VscodeTreeItem } from "@vscode-elements/elements/dist/vscode-tree-item";
 import "./styles.css";
 import { compile, fetchProject, fetchStatus, readSource, runProgram as runProgramApi, syncProject } from "./api";
 import { highlightAssembly, simplifyAssembly } from "./assembly";
@@ -24,9 +31,23 @@ import {
 } from "./layoutController";
 import { attachLspClient, type LspHandle } from "./lspClient";
 import { createModalController } from "./modal";
-import { normalizeProjectPath, pathsEqual, validateEditableSourcePath } from "./projectPaths";
+import {
+  normalizeProjectPath,
+  pathsEqual,
+  validateEditableFolderPath,
+  validateEditableSourcePath
+} from "./projectPaths";
 import { cloneProject, isProjectStateLike, projectFingerprint } from "./projectState";
 import { formatRunOutput } from "./runOutput";
+import {
+  buildFileTree,
+  childPathInFolder,
+  fileDisplayName,
+  folderAncestorPaths,
+  parentFolderPath,
+  pathInsideFolder,
+  type FileTreeNode
+} from "./fileTree";
 import {
   clearStoredDraft,
   readStoredDraft,
@@ -47,15 +68,26 @@ self.MonacoEnvironment = {
   }
 };
 
+function ensureCodiconStylesheet(): void {
+  if (document.getElementById("vscode-codicon-stylesheet")) return;
+  const link = document.createElement("link");
+  link.id = "vscode-codicon-stylesheet";
+  link.rel = "stylesheet";
+  link.href = codiconStylesHref;
+  document.head.append(link);
+}
+
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("missing #app");
+ensureCodiconStylesheet();
 mountAppShell(app);
 
 const statusEl = must("#status");
 const metaEl = must("#meta");
 const workspaceEl = must<HTMLDivElement>("#workspace");
 const sidebarEl = must<HTMLElement>(".sidebar");
-const filesEl = must("#files");
+const openEditorsEl = must<HTMLDivElement>("#open-editors");
+const filesEl = must<VscodeTree>("#files");
 const tabsEl = must("#tabs");
 const asmPaneEl = must<HTMLElement>(".asm-pane");
 const editorHostEl = must<HTMLDivElement>("#editor");
@@ -76,6 +108,8 @@ const consoleResizerEl = must<HTMLDivElement>("#console-resizer");
 const asmCsappEl = must<HTMLButtonElement>("#asm-csapp");
 const asmRawEl = must<HTMLButtonElement>("#asm-raw");
 const fileMenuEl = must<HTMLDivElement>("#file-menu");
+const fileMenuNewFileEl = must<HTMLButtonElement>("#file-menu-new-file");
+const fileMenuNewFolderEl = must<HTMLButtonElement>("#file-menu-new-folder");
 const fileMenuRenameEl = must<HTMLButtonElement>("#file-menu-rename");
 const fileMenuDeleteEl = must<HTMLButtonElement>("#file-menu-delete");
 const modal = createModalController(
@@ -131,13 +165,19 @@ let latestCompileId = "";
 let latestRunId = "";
 let lsp: LspHandle | undefined;
 let projectRootUri = "";
-let contextMenuPath = "";
+type ExplorerTargetKind = "root" | "folder" | "file";
+type ExplorerTarget = { kind: ExplorerTargetKind; path: string };
+const rootExplorerTarget: ExplorerTarget = { kind: "root", path: "" };
+let contextMenuTarget: ExplorerTarget = rootExplorerTarget;
 let contextMenuInvoker: HTMLElement | null = null;
-let inlineRenamePath = "";
+let inlineRenameTarget: ExplorerTarget | null = null;
+let pendingExplorerFocus: ExplorerTarget | null = null;
+let folderStateInitialized = false;
 let latestAsm = "";
 let latestDiagnostics = "";
 let latestRunOutput = "";
 let asmView: "csapp" | "raw" = "csapp";
+const openFolderPaths = new Set<string>();
 const layoutController = createLayoutController({
   editor,
   elements: {
@@ -244,19 +284,36 @@ compilerArgsEl.addEventListener("input", () => {
   scheduleCompile();
 });
 
-must("#new-file").addEventListener("click", () => createFile());
+must("#new-file").addEventListener("click", () => createFile(rootExplorerTarget));
+must("#new-folder").addEventListener("click", () => createFolder(rootExplorerTarget));
+must("#collapse-folders").addEventListener("click", () => {
+  openFolderPaths.clear();
+  renderFiles(false);
+});
+
+fileMenuNewFileEl.addEventListener("click", () => {
+  const target = contextMenuTarget;
+  hideFileMenu();
+  createFile(target);
+});
+
+fileMenuNewFolderEl.addEventListener("click", () => {
+  const target = contextMenuTarget;
+  hideFileMenu();
+  createFolder(target);
+});
 
 fileMenuRenameEl.addEventListener("click", () => {
-  const path = contextMenuPath;
+  const target = contextMenuTarget;
   hideFileMenu();
-  if (path) beginInlineRename(path);
+  if (target.kind !== "root") beginInlineRename(target);
 });
 
 fileMenuDeleteEl.addEventListener("click", () => {
-  const path = contextMenuPath;
+  const target = contextMenuTarget;
   const restoreFocus = contextMenuInvoker;
   hideFileMenu();
-  if (path) void deleteFile(path, restoreFocus);
+  if (target.kind !== "root") void deleteExplorerTarget(target, restoreFocus);
 });
 
 window.addEventListener("click", (event) => {
@@ -264,7 +321,11 @@ window.addEventListener("click", (event) => {
 });
 
 window.addEventListener("contextmenu", (event) => {
-  if (!fileMenuEl.hidden && !fileMenuEl.contains(event.target as Node) && !(event.target as Element).closest?.(".file-row")) {
+  if (
+    !fileMenuEl.hidden &&
+    !fileMenuEl.contains(event.target as Node) &&
+    !(event.target as Element).closest?.("vscode-tree-item")
+  ) {
     hideFileMenu();
   }
 });
@@ -276,7 +337,7 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    if (inlineRenamePath) {
+    if (inlineRenameTarget) {
       event.preventDefault();
       cancelInlineRename(true);
       return;
@@ -284,19 +345,34 @@ window.addEventListener("keydown", (event) => {
     hideFileMenu(true);
     return;
   }
-  const path = shortcutTargetPath(event.target);
-  if (!path) return;
+  const target = shortcutTarget(event.target);
+  if (!target) return;
   if (event.key === "F2") {
     event.preventDefault();
-    beginInlineRename(path);
+    beginInlineRename(target);
   }
   if (event.key === "Delete") {
     event.preventDefault();
-    void deleteFile(path);
+    void deleteExplorerTarget(target);
   }
 });
 
 filesEl.addEventListener("scroll", () => hideFileMenu());
+filesEl.addEventListener("vsc-tree-select", (event) => {
+  const item = selectedTreeItems(event)[0];
+  if (!item) return;
+  captureOpenFolders();
+  const target = treeItemTarget(item);
+  if (target?.kind === "file") openFile(target.path);
+});
+filesEl.addEventListener("click", () => window.requestAnimationFrame(captureOpenFolders));
+filesEl.addEventListener("keydown", () => window.requestAnimationFrame(captureOpenFolders));
+filesEl.addEventListener("contextmenu", (event) => {
+  const item = (event.target as Element).closest?.("vscode-tree-item") as VscodeTreeItem | null;
+  if (item) return;
+  event.preventDefault();
+  showFileMenu(rootExplorerTarget, event.clientX, event.clientY, filesEl);
+});
 
 function openFile(pathInput: string): void {
   const canonicalPath = canonicalSourcePath(pathInput);
@@ -307,6 +383,7 @@ function openFile(pathInput: string): void {
   const readOnly = readOnlyFiles.has(path);
   ensureOpenTab(path);
   if (!readOnly) project.activeFile = path;
+  addOpenAncestors(path);
 
   let model = models.get(path);
   if (!model) {
@@ -323,8 +400,8 @@ function openFile(pathInput: string): void {
 
   activeModel = model;
   editor.setModel(model);
-  editor.updateOptions({ readOnly, readOnlyMessage: { value: "Third-party include sources are read-only." } });
-  renderFiles();
+  editor.updateOptions({ readOnly, readOnlyMessage: { value: "System include sources are read-only." } });
+  renderFiles(false);
   renderTabs();
   persistOpenTabs();
   if (!readOnly && path.endsWith(".c")) scheduleCompile();
@@ -477,128 +554,189 @@ function activeEditorPath(): string {
   return "";
 }
 
-function renderFiles(): void {
+function renderFiles(captureTreeState = true): void {
+  if (captureTreeState) captureOpenFolders();
   hideFileMenu();
-  if (inlineRenamePath && !project.files.some((file) => file.path === inlineRenamePath)) {
-    inlineRenamePath = "";
-  }
+  initialiseFolderState();
+  if (inlineRenameTarget && !explorerTargetExists(inlineRenameTarget)) inlineRenameTarget = null;
+
+  renderOpenEditors();
   filesEl.innerHTML = "";
-  const activePath = activeEditorPath();
-  for (const file of sortedFiles()) {
-    const row = document.createElement("div");
-    row.className = pathsEqual(file.path, activePath) ? "file-row active" : "file-row";
+  for (const node of buildFileTree(sortedFiles())) {
+    filesEl.append(renderExplorerNode(node));
+  }
 
-    if (file.path === inlineRenamePath) {
-      row.classList.add("renaming");
-      const renameInput = document.createElement("input");
-      renameInput.type = "text";
-      renameInput.className = "file-rename-input";
-      renameInput.value = file.path;
-      renameInput.title = file.path;
-      renameInput.dataset.path = file.path;
-      renameInput.spellcheck = false;
-      renameInput.setAttribute("aria-label", `Rename ${file.path}`);
-
-      let closing = false;
-      const cancel = () => {
-        closing = true;
-        cancelInlineRename(true);
-      };
-      const commit = async () => {
-        if (closing) return;
-        closing = true;
-        const renamed = await renameFile(file.path, renameInput.value);
-        if (!renamed) {
-          closing = false;
-          renameInput.focus();
-          renameInput.select();
-        }
-      };
-
-      renameInput.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.isComposing) {
-          event.preventDefault();
-          event.stopPropagation();
-          void commit();
-        }
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.stopPropagation();
-          cancel();
-        }
-      });
-      renameInput.addEventListener("blur", () => {
-        if (!closing) void commit();
-      });
-
-      row.append(renameInput);
-      filesEl.append(row);
-      window.requestAnimationFrame(() => {
-        renameInput.focus();
-        renameInput.select();
-      });
-      continue;
-    }
-
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "file";
-    openButton.title = file.path;
-    openButton.dataset.path = file.path;
-    openButton.setAttribute("aria-haspopup", "menu");
-
-    const icon = document.createElement("span");
-    icon.className = file.path.endsWith(".h") ? "file-icon header" : "file-icon source";
-    icon.textContent = file.path.endsWith(".h") ? "H" : "C";
-    const label = document.createElement("span");
-    label.className = "file-name";
-    label.textContent = file.path;
-    openButton.append(icon, label);
-
-    openButton.addEventListener("click", () => openFile(file.path));
-    openButton.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      openFile(file.path);
-      showFileMenu(file.path, event.clientX, event.clientY, fileButtonForPath(file.path) ?? openButton);
-    });
-    openButton.addEventListener("keydown", (event) => {
-      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-      event.preventDefault();
-      openFile(file.path);
-      const invoker = fileButtonForPath(file.path) ?? openButton;
-      const rect = invoker.getBoundingClientRect();
-      showFileMenu(file.path, rect.left + 8, rect.bottom + 4, invoker);
-    });
-
-    row.append(openButton);
-    filesEl.append(row);
+  const focusTarget = pendingExplorerFocus;
+  pendingExplorerFocus = null;
+  if (focusTarget) {
+    window.requestAnimationFrame(() => explorerItemForTarget(focusTarget)?.focus());
   }
 }
 
-function beginInlineRename(path: string): void {
-  if (!project.files.some((file) => file.path === path)) return;
+function renderOpenEditors(): void {
+  pruneOpenTabs();
+  openEditorsEl.innerHTML = "";
+  const activePath = activeEditorPath();
+
+  for (const path of openTabs) {
+    const row = document.createElement("div");
+    row.className = pathsEqual(path, activePath) ? "open-editor-row active" : "open-editor-row";
+    row.title = path;
+    row.dataset.path = path;
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "open-editor-select";
+    selectButton.setAttribute("aria-label", `Open ${path}`);
+    selectButton.append(createIcon(iconNameForFile(path)), editorLabel(path, parentFolderPath(path)));
+    selectButton.addEventListener("click", () => openFile(path));
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "open-editor-close";
+    closeButton.title = `Close ${path}`;
+    closeButton.setAttribute("aria-label", `Close ${path}`);
+    closeButton.append(createIcon("close"));
+    closeButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTab(path);
+    });
+
+    row.append(selectButton, closeButton);
+    openEditorsEl.append(row);
+  }
+}
+
+function renderExplorerNode(node: FileTreeNode): VscodeTreeItem {
+  const item = document.createElement("vscode-tree-item");
+  const target: ExplorerTarget = { kind: node.kind, path: node.path };
+  item.className = `explorer-tree-item ${node.kind}`;
+  item.dataset.projectKind = target.kind;
+  item.dataset.projectPath = target.path;
+  item.title = target.path;
+
+  if (node.kind === "folder") {
+    item.branch = true;
+    item.open = openFolderPaths.has(node.path);
+    item.append(createIcon("folder", "icon-branch"), createIcon("folder-opened", "icon-branch-opened"));
+  } else {
+    item.selected = pathsEqual(node.path, activeEditorPath());
+    item.append(createIcon(iconNameForFile(node.path), "icon-leaf"));
+  }
+
+  appendTreeLabel(item, target, node.name);
+  if (node.kind === "folder") {
+    for (const child of node.children) item.append(renderExplorerNode(child));
+  }
+
+  item.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (target.kind === "file") openFile(target.path);
+    showFileMenu(target, event.clientX, event.clientY, item);
+  });
+  item.addEventListener("keydown", (event) => {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    if (target.kind === "file") openFile(target.path);
+    const rect = item.getBoundingClientRect();
+    showFileMenu(target, rect.left + 8, rect.bottom + 4, item);
+  });
+  return item;
+}
+
+function appendTreeLabel(item: VscodeTreeItem, target: ExplorerTarget, labelText: string): void {
+  if (isInlineRenameTarget(target)) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "file-rename-input";
+    input.value = target.path;
+    input.title = target.path;
+    input.spellcheck = false;
+    input.setAttribute("aria-label", `Rename ${target.path}`);
+
+    let closing = false;
+    const cancel = () => {
+      closing = true;
+      cancelInlineRename(true);
+    };
+    const commit = async () => {
+      if (closing) return;
+      closing = true;
+      const renamed = await renameExplorerTarget(target, input.value);
+      if (!renamed) {
+        closing = false;
+        input.focus();
+        input.select();
+      }
+    };
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        event.stopPropagation();
+        void commit();
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        cancel();
+      }
+    });
+    input.addEventListener("blur", () => {
+      if (!closing) void commit();
+    });
+
+    item.append(input);
+    window.requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+    return;
+  }
+
+  const label = document.createElement("span");
+  label.className = "tree-label";
+  label.textContent = labelText;
+  item.append(label);
+}
+
+function beginInlineRename(target: ExplorerTarget): void {
+  if (!explorerTargetExists(target) || target.kind === "root") return;
   hideFileMenu();
-  inlineRenamePath = path;
-  renderFiles();
+  inlineRenameTarget = target;
+  addOpenAncestors(target.path);
+  renderFiles(false);
 }
 
 function cancelInlineRename(restoreFocus = false): void {
-  const path = inlineRenamePath;
-  inlineRenamePath = "";
-  renderFiles();
-  if (restoreFocus && path) fileButtonForPath(path)?.focus();
+  const target = inlineRenameTarget;
+  inlineRenameTarget = null;
+  renderFiles(false);
+  if (restoreFocus && target) explorerItemForTarget(target)?.focus();
 }
 
-function fileButtonForPath(path: string): HTMLButtonElement | null {
-  for (const button of filesEl.querySelectorAll<HTMLButtonElement>(".file")) {
-    if (button.dataset.path === path) return button;
+function isInlineRenameTarget(target: ExplorerTarget): boolean {
+  return Boolean(
+    inlineRenameTarget &&
+      inlineRenameTarget.kind === target.kind &&
+      pathsEqual(inlineRenameTarget.path, target.path)
+  );
+}
+
+function explorerItemForTarget(target: ExplorerTarget): VscodeTreeItem | null {
+  for (const item of filesEl.querySelectorAll<VscodeTreeItem>("vscode-tree-item")) {
+    if (item.dataset.projectKind === target.kind && pathsEqual(item.dataset.projectPath ?? "", target.path)) return item;
   }
   return null;
 }
 
-function showFileMenu(path: string, x: number, y: number, invoker: HTMLElement): void {
-  contextMenuPath = path;
+function showFileMenu(target: ExplorerTarget, x: number, y: number, invoker: HTMLElement): void {
+  contextMenuTarget = target;
   contextMenuInvoker = invoker;
+  const isRoot = target.kind === "root";
+  fileMenuRenameEl.hidden = isRoot;
+  fileMenuDeleteEl.hidden = isRoot;
   fileMenuEl.hidden = false;
 
   const width = fileMenuEl.offsetWidth;
@@ -607,15 +745,17 @@ function showFileMenu(path: string, x: number, y: number, invoker: HTMLElement):
   const top = Math.min(y, window.innerHeight - height - 8);
   fileMenuEl.style.left = `${Math.max(8, left)}px`;
   fileMenuEl.style.top = `${Math.max(8, top)}px`;
-  fileMenuRenameEl.focus();
+  fileMenuNewFileEl.focus();
 }
 
 function hideFileMenu(restoreFocus = false): void {
   if (fileMenuEl.hidden) return;
   const invoker = contextMenuInvoker;
   fileMenuEl.hidden = true;
-  contextMenuPath = "";
+  contextMenuTarget = rootExplorerTarget;
   contextMenuInvoker = null;
+  fileMenuRenameEl.hidden = false;
+  fileMenuDeleteEl.hidden = false;
   if (restoreFocus) invoker?.focus();
 }
 
@@ -671,8 +811,9 @@ function sortedFiles(): ProjectFile[] {
   return [...project.files].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function createFile(): void {
-  const base = "new-file";
+function createFile(target: ExplorerTarget = rootExplorerTarget): void {
+  const folderPath = targetFolderPath(target);
+  const base = childPathInFolder(folderPath, "new-file");
   let index = 0;
   let path = `${base}.c`;
   while (project.files.some((file) => pathsEqual(file.path, path))) {
@@ -680,9 +821,34 @@ function createFile(): void {
     path = `${base}${index}.c`;
   }
   project.files.push({ path, content: "" });
-  inlineRenamePath = path;
+  inlineRenameTarget = { kind: "file", path };
+  addOpenAncestors(path);
   openFile(path);
   scheduleSync();
+}
+
+function createFolder(target: ExplorerTarget = rootExplorerTarget): void {
+  const parentPath = targetFolderPath(target);
+  let index = 0;
+  let folderPath = childPathInFolder(parentPath, "new-folder");
+  while (project.files.some((file) => pathInsideFolder(file.path, folderPath))) {
+    index += 1;
+    folderPath = childPathInFolder(parentPath, `new-folder${index}`);
+  }
+
+  const path = `${folderPath}/main.c`;
+  project.files.push({ path, content: "" });
+  openFolderPaths.add(folderPath);
+  addOpenAncestors(path);
+  inlineRenameTarget = { kind: "folder", path: folderPath };
+  openFile(path);
+  scheduleSync();
+}
+
+async function renameExplorerTarget(target: ExplorerTarget, nextPathInput: string): Promise<boolean> {
+  if (target.kind === "file") return renameFile(target.path, nextPathInput);
+  if (target.kind === "folder") return renameFolder(target.path, nextPathInput);
+  return false;
 }
 
 async function renameFile(oldPath: string, nextPathInput: string): Promise<boolean> {
@@ -691,9 +857,9 @@ async function renameFile(oldPath: string, nextPathInput: string): Promise<boole
 
   const nextPath = normalizeProjectPath(nextPathInput);
   if (!nextPath || nextPath === oldPath) {
-    inlineRenamePath = "";
-    renderFiles();
-    fileButtonForPath(oldPath)?.focus();
+    inlineRenameTarget = null;
+    renderFiles(false);
+    explorerItemForTarget({ kind: "file", path: oldPath })?.focus();
     return true;
   }
   const validationError = validateEditableSourcePath(nextPath);
@@ -723,8 +889,9 @@ async function renameFile(oldPath: string, nextPathInput: string): Promise<boole
     return false;
   }
 
-  inlineRenamePath = "";
+  inlineRenameTarget = null;
   replaceOpenTabPath(oldPath, nextPath);
+  addOpenAncestors(nextPath);
   if (oldModel) {
     if (activeModel === oldModel) editor.setModel(null);
     oldModel.dispose();
@@ -734,9 +901,82 @@ async function renameFile(oldPath: string, nextPathInput: string): Promise<boole
   renderFiles();
   renderTabs();
   openFile(nextPath);
-  fileButtonForPath(nextPath)?.focus();
+  pendingExplorerFocus = { kind: "file", path: nextPath };
+  renderFiles(false);
   statusEl.textContent = "Saved";
   return true;
+}
+
+async function renameFolder(oldPath: string, nextPathInput: string): Promise<boolean> {
+  const movingFiles = project.files.filter((file) => pathInsideFolder(file.path, oldPath));
+  if (movingFiles.length === 0) return false;
+
+  const nextPath = normalizeProjectPath(nextPathInput).replace(/\/+$/, "");
+  if (!nextPath || pathsEqual(nextPath, oldPath)) {
+    inlineRenameTarget = null;
+    renderFiles(false);
+    explorerItemForTarget({ kind: "folder", path: oldPath })?.focus();
+    return true;
+  }
+  const validationError = validateEditableFolderPath(nextPath);
+  if (validationError) {
+    setDiagnostics(validationError);
+    return false;
+  }
+  const movingKeys = new Set(movingFiles.map((file) => file.path.toLowerCase()));
+  if (project.files.some((file) => !movingKeys.has(file.path.toLowerCase()) && pathInsideFolder(file.path, nextPath))) {
+    setDiagnostics(`${nextPath} already exists`);
+    return false;
+  }
+
+  const nextProject = cloneProject(project);
+  const renames = new Map<string, string>();
+  for (const file of nextProject.files) {
+    if (!pathInsideFolder(file.path, oldPath)) continue;
+    const oldFilePath = file.path;
+    const model = models.get(oldFilePath);
+    file.content = model?.getValue() ?? file.content;
+    file.path = nextPath + oldFilePath.slice(oldPath.length);
+    renames.set(oldFilePath, file.path);
+  }
+  if (pathInsideFolder(nextProject.activeFile, oldPath)) {
+    nextProject.activeFile = nextPath + nextProject.activeFile.slice(oldPath.length);
+  }
+  const wasActive = pathInsideFolder(activeEditorPath(), oldPath);
+
+  try {
+    statusEl.textContent = "Saving";
+    await persistProjectNow(nextProject);
+  } catch (err) {
+    statusEl.textContent = "Save failed";
+    setDiagnostics(String(err));
+    return false;
+  }
+
+  inlineRenameTarget = null;
+  for (const [oldFilePath, nextFilePath] of renames) {
+    replaceOpenTabPath(oldFilePath, nextFilePath);
+    const model = models.get(oldFilePath);
+    if (!model) continue;
+    if (activeModel === model) editor.setModel(null);
+    model.dispose();
+    models.delete(oldFilePath);
+  }
+  openFolderPaths.delete(oldPath);
+  openFolderPaths.add(nextPath);
+  addOpenAncestors(`${nextPath}/placeholder.c`);
+  setDiagnostics("");
+  renderTabs();
+  if (wasActive) openFile(project.activeFile);
+  pendingExplorerFocus = { kind: "folder", path: nextPath };
+  renderFiles(false);
+  statusEl.textContent = "Saved";
+  return true;
+}
+
+async function deleteExplorerTarget(target: ExplorerTarget, restoreFocus?: HTMLElement | null): Promise<void> {
+  if (target.kind === "file") return deleteFile(target.path, restoreFocus);
+  if (target.kind === "folder") return deleteFolder(target.path, restoreFocus);
 }
 
 async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Promise<void> {
@@ -785,6 +1025,154 @@ async function deleteFile(path: string, restoreFocus?: HTMLElement | null): Prom
   renderTabs();
   statusEl.textContent = "Saved";
   scheduleCompile();
+}
+
+async function deleteFolder(path: string, restoreFocus?: HTMLElement | null): Promise<void> {
+  const filesToDelete = project.files.filter((file) => pathInsideFolder(file.path, path));
+  if (filesToDelete.length === 0) return;
+  if (filesToDelete.length >= project.files.length) {
+    setDiagnostics("Keep at least one project file.");
+    return;
+  }
+
+  const confirmed = await modal.showConfirm(
+    "Delete folder",
+    `Delete ${path} and ${filesToDelete.length} file${filesToDelete.length === 1 ? "" : "s"}?`,
+    "Delete",
+    true,
+    restoreFocus ?? modal.focusedElement()
+  );
+  if (!confirmed) return;
+
+  const deletedKeys = new Set(filesToDelete.map((file) => file.path.toLowerCase()));
+  const nextProject = cloneProject(project);
+  nextProject.files = nextProject.files.filter((file) => !deletedKeys.has(file.path.toLowerCase()));
+  if (pathInsideFolder(nextProject.activeFile, path)) {
+    const next = nextProject.files.find((file) => file.path.endsWith(".c")) ?? nextProject.files[0];
+    nextProject.activeFile = next.path;
+  }
+
+  const wasActive = pathInsideFolder(activeEditorPath(), path);
+  try {
+    statusEl.textContent = "Saving";
+    await persistProjectNow(nextProject);
+  } catch (err) {
+    statusEl.textContent = "Save failed";
+    setDiagnostics(String(err));
+    return;
+  }
+
+  for (const file of filesToDelete) {
+    const model = models.get(file.path);
+    if (model) {
+      if (activeModel === model) editor.setModel(null);
+      model.dispose();
+      models.delete(file.path);
+    }
+    removeOpenTabPath(file.path);
+  }
+  openFolderPaths.delete(path);
+
+  if (wasActive) {
+    const next = project.files.find((file) => file.path === project.activeFile) ?? project.files[0];
+    activeModel = null;
+    openFile(next.path);
+  }
+
+  setDiagnostics("");
+  renderFiles();
+  renderTabs();
+  statusEl.textContent = "Saved";
+  scheduleCompile();
+}
+
+function targetFolderPath(target: ExplorerTarget): string {
+  if (target.kind === "folder") return target.path;
+  if (target.kind === "file") return parentFolderPath(target.path);
+  return "";
+}
+
+function selectedTreeItems(event: Event): VscodeTreeItem[] {
+  const detail = (event as CustomEvent<VscodeTreeItem[] | { selectedItems: VscodeTreeItem[] }>).detail;
+  if (Array.isArray(detail)) return detail;
+  return detail?.selectedItems ?? [];
+}
+
+function treeItemTarget(item: VscodeTreeItem): ExplorerTarget | undefined {
+  const kind = item.dataset.projectKind;
+  const path = item.dataset.projectPath ?? "";
+  if (kind !== "file" && kind !== "folder") return undefined;
+  return { kind, path };
+}
+
+function captureOpenFolders(): void {
+  for (const item of filesEl.querySelectorAll<VscodeTreeItem>('vscode-tree-item[data-project-kind="folder"]')) {
+    const path = item.dataset.projectPath;
+    if (!path) continue;
+    if (item.open) {
+      openFolderPaths.add(path);
+    } else {
+      openFolderPaths.delete(path);
+    }
+  }
+}
+
+function initialiseFolderState(): void {
+  if (folderStateInitialized) return;
+  for (const path of folderPathsFromNodes(buildFileTree(project.files))) openFolderPaths.add(path);
+  folderStateInitialized = true;
+}
+
+function folderPathsFromNodes(nodes: FileTreeNode[]): string[] {
+  const paths: string[] = [];
+  for (const node of nodes) {
+    if (node.kind !== "folder") continue;
+    paths.push(node.path);
+    paths.push(...folderPathsFromNodes(node.children));
+  }
+  return paths;
+}
+
+function explorerTargetExists(target: ExplorerTarget): boolean {
+  if (target.kind === "root") return true;
+  if (target.kind === "file") return project.files.some((file) => pathsEqual(file.path, target.path));
+  return project.files.some((file) => pathInsideFolder(file.path, target.path));
+}
+
+function addOpenAncestors(path: string): void {
+  for (const ancestor of folderAncestorPaths(path)) openFolderPaths.add(ancestor);
+}
+
+function createIcon(name: string, slot?: string): VscodeIcon {
+  const icon = document.createElement("vscode-icon");
+  icon.name = name;
+  icon.size = 16;
+  if (slot) icon.slot = slot;
+  return icon;
+}
+
+function iconNameForFile(path: string): string {
+  if (path.endsWith(".h")) return "symbol-file";
+  if (path.endsWith(".inc")) return "file-text";
+  return "file-code";
+}
+
+function editorLabel(path: string, description: string): HTMLSpanElement {
+  const wrapper = document.createElement("span");
+  wrapper.className = "editor-label";
+
+  const name = document.createElement("span");
+  name.className = "editor-label-name";
+  name.textContent = fileDisplayName(path);
+  wrapper.append(name);
+
+  if (description) {
+    const desc = document.createElement("span");
+    desc.className = "editor-label-description";
+    desc.textContent = description;
+    wrapper.append(desc);
+  }
+  return wrapper;
 }
 
 function scheduleSync(): void {
@@ -1047,7 +1435,7 @@ function renderAssembly(): void {
 }
 
 function renderMeta(status: StatusResponse): void {
-  metaEl.textContent = `Project: ${status.projectDir} | Include: ${status.includeDir} | System: ${status.systemIncludeDir}`;
+  metaEl.textContent = `Project: ${status.projectDir} | System: ${status.systemIncludeDir}`;
 }
 
 editor.onMouseDown((event) => {
@@ -1117,19 +1505,24 @@ function pathToFileUri(path: string): string {
   return monaco.Uri.file(path).toString();
 }
 
-function shortcutTargetPath(target: EventTarget | null): string {
-  if (!(target instanceof Element)) return "";
+function shortcutTarget(target: EventTarget | null): ExplorerTarget | undefined {
+  if (!(target instanceof Element)) return undefined;
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
-    return "";
+    return undefined;
   }
-  if (modal.isActive() && modal.contains(target)) return "";
-  if (!fileMenuEl.hidden && fileMenuEl.contains(target)) return "";
+  if (modal.isActive() && modal.contains(target)) return undefined;
+  if (!fileMenuEl.hidden && fileMenuEl.contains(target)) return undefined;
 
-  const fileButton = target.closest<HTMLButtonElement>(".file");
-  if (fileButton?.dataset.path) return fileButton.dataset.path;
-  if (target.closest(".editor")) return activeEditorPath() || project.activeFile;
-  if (target === document.body) return activeEditorPath() || project.activeFile;
-  return "";
+  const treeItem = target.closest("vscode-tree-item") as VscodeTreeItem | null;
+  const treeTarget = treeItem ? treeItemTarget(treeItem) : undefined;
+  if (treeTarget) return treeTarget;
+
+  const activePath = activeEditorPath() || project.activeFile;
+  const activeFile = project.files.find((file) => pathsEqual(file.path, activePath));
+  if ((target.closest(".editor") || target === document.body) && activeFile) {
+    return { kind: "file", path: activeFile.path };
+  }
+  return undefined;
 }
 
 window.addEventListener("beforeunload", () => {

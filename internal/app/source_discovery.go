@@ -30,8 +30,8 @@ func (c *Compiler) discoverRunSourcePaths(ctx context.Context, activeSourcePath 
 		if err != nil {
 			return err
 		}
-		if !c.isProjectOrIncludePath(abs) {
-			return fmt.Errorf("source %q is outside the project and include folders", abs)
+		if !c.isProjectPath(abs) {
+			return fmt.Errorf("source %q is outside the project folder", abs)
 		}
 		key := strings.ToLower(abs)
 		if _, ok := seenSources[key]; ok {
@@ -65,11 +65,11 @@ func (c *Compiler) discoverRunSourcePaths(ctx context.Context, activeSourcePath 
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if !isHeaderPath(dep) || !c.isProjectOrIncludePath(dep) {
+			if !isHeaderPath(dep) || !c.isProjectPath(dep) {
 				continue
 			}
 			impl, ok := implementationSourceForHeader(dep)
-			if !ok || !c.isProjectOrIncludePath(impl) {
+			if !ok || !c.isProjectPath(impl) {
 				continue
 			}
 			if err := addSource(impl); err != nil {
@@ -168,8 +168,8 @@ func isHeaderPath(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".h")
 }
 
-func (c *Compiler) isProjectOrIncludePath(path string) bool {
-	return pathInsideRoot(c.projectDir, path) || pathInsideRoot(c.includeDir, path)
+func (c *Compiler) isProjectPath(path string) bool {
+	return pathInsideRoot(c.projectDir, path)
 }
 
 func pathInsideRoot(root, path string) bool {
