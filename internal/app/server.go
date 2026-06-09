@@ -15,8 +15,15 @@ import (
 	"time"
 )
 
-//go:embed static
+//go:embed all:static
 var staticFiles embed.FS
+
+const (
+	maxProjectSyncBodyBytes = 4 << 20
+	maxCompileBodyBytes     = 1 << 20
+	maxRunBodyBytes         = 64 << 10
+	maxSourceReadBodyBytes  = 16 << 10
+)
 
 type Server struct {
 	cfg          Config
@@ -150,7 +157,7 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProjectSync(w http.ResponseWriter, r *http.Request) {
 	var state ProjectState
-	if err := json.NewDecoder(r.Body).Decode(&state); err != nil {
+	if err := decodeJSONBody(w, r, maxProjectSyncBodyBytes, &state); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -163,7 +170,11 @@ func (s *Server) handleProjectSync(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCompile(w http.ResponseWriter, r *http.Request) {
 	var req CompileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(w, r, maxCompileBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateCompilerArgsLength(req.CompilerArgs); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -194,7 +205,11 @@ func (s *Server) handleCompile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(w, r, maxRunBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateCompilerArgsLength(req.CompilerArgs); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -238,6 +253,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, value any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return json.NewDecoder(r.Body).Decode(value)
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

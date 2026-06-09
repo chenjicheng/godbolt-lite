@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,16 @@ type ProjectState struct {
 	ActiveFile   string        `json:"activeFile"`
 	CompilerArgs string        `json:"compilerArgs"`
 }
+
+const (
+	maxProjectFiles              = 128
+	maxProjectFileBytes          = 512 << 10
+	maxProjectTotalBytes         = 2 << 20
+	maxCompilerArgsBytes         = 8 << 10
+	maxIncludeSourceCommandFiles = 512
+)
+
+var errIncludeSourceCommandLimit = errors.New("include source command limit reached")
 
 type ProjectStore struct {
 	dir              string
@@ -126,30 +137,33 @@ func (p *ProjectStore) writeLocked(state, previous ProjectState) error {
 	if err != nil {
 		return err
 	}
-	if err := p.removeDeletedFilesLocked(previous, state); err != nil {
-		return err
-	}
-	for _, file := range state.Files {
-		target := filepath.Join(p.dir, filepath.FromSlash(file.Path))
-		if err := ensurePathInside(p.dir, target); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(target, []byte(file.Content), 0o644); err != nil {
-			return err
-		}
-	}
 
 	manifest, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(p.dir, "project.json"), manifest, 0o644); err != nil {
+	compileCommands, err := p.compileCommandsJSONLocked(state, compilerArgs)
+	if err != nil {
 		return err
 	}
-	return p.writeCompileCommandsLocked(state, compilerArgs)
+
+	for _, file := range state.Files {
+		target := filepath.Join(p.dir, filepath.FromSlash(file.Path))
+		if err := ensurePathInside(p.dir, target); err != nil {
+			return err
+		}
+		if err := p.writeProjectFileAtomically(target, []byte(file.Content), 0o644); err != nil {
+			return err
+		}
+	}
+
+	if err := p.writeProjectFileAtomically(filepath.Join(p.dir, "compile_commands.json"), compileCommands, 0o644); err != nil {
+		return err
+	}
+	if err := p.writeProjectFileAtomically(filepath.Join(p.dir, "project.json"), manifest, 0o644); err != nil {
+		return err
+	}
+	return p.removeDeletedFilesLocked(previous, state)
 }
 
 func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) error {
@@ -175,7 +189,7 @@ func (p *ProjectStore) removeDeletedFilesLocked(previous, next ProjectState) err
 	return nil
 }
 
-func (p *ProjectStore) writeCompileCommandsLocked(state ProjectState, compilerArgs []string) error {
+func (p *ProjectStore) compileCommandsJSONLocked(state ProjectState, compilerArgs []string) ([]byte, error) {
 	var commands []commandEntry
 	for _, file := range state.Files {
 		if strings.EqualFold(filepath.Ext(file.Path), ".c") {
@@ -185,14 +199,14 @@ func (p *ProjectStore) writeCompileCommandsLocked(state ProjectState, compilerAr
 	}
 	includeEntries, err := p.includeSourceCommands(compilerArgs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	commands = append(commands, includeEntries...)
 	out, err := json.MarshalIndent(commands, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(filepath.Join(p.dir, "compile_commands.json"), out, 0o644)
+	return out, nil
 }
 
 func (p *ProjectStore) compilerArgsForState(state ProjectState) ([]string, error) {
@@ -216,12 +230,32 @@ func (p *ProjectStore) includeSourceCommands(compilerArgs []string) ([]commandEn
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".c") {
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode&os.ModeSymlink != 0 || mode&os.ModeIrregular != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !mode.IsRegular() || !strings.EqualFold(filepath.Ext(path), ".c") {
+			return nil
+		}
+		if len(commands) >= maxIncludeSourceCommandFiles {
+			return errIncludeSourceCommandLimit
 		}
 		commands = append(commands, p.compileCommandFor(path, compilerArgs))
 		return nil
 	})
+	if errors.Is(err, errIncludeSourceCommandLimit) {
+		return commands, nil
+	}
 	return commands, err
 }
 
@@ -253,8 +287,19 @@ func (p *ProjectStore) compileCommandFor(absFile string, compilerArgs []string) 
 }
 
 func normalizeState(state ProjectState) (ProjectState, error) {
+	if len(state.Files) == 0 {
+		return ProjectState{}, errors.New("project must contain at least one source file")
+	}
+	if len(state.Files) > maxProjectFiles {
+		return ProjectState{}, fmt.Errorf("project has %d files; maximum is %d", len(state.Files), maxProjectFiles)
+	}
+	if err := validateCompilerArgsLength(state.CompilerArgs); err != nil {
+		return ProjectState{}, err
+	}
+
 	seen := make(map[string]struct{}, len(state.Files))
 	files := make([]ProjectFile, 0, len(state.Files))
+	totalBytes := 0
 	for _, file := range state.Files {
 		clean, err := cleanProjectPath(file.Path)
 		if err != nil {
@@ -266,6 +311,14 @@ func normalizeState(state ProjectState) (ProjectState, error) {
 		seenKey := strings.ToLower(clean)
 		if _, ok := seen[seenKey]; ok {
 			return ProjectState{}, fmt.Errorf("duplicate project file %q", clean)
+		}
+		size := len([]byte(file.Content))
+		if size > maxProjectFileBytes {
+			return ProjectState{}, fmt.Errorf("project file %q is %d bytes; maximum is %d", clean, size, maxProjectFileBytes)
+		}
+		totalBytes += size
+		if totalBytes > maxProjectTotalBytes {
+			return ProjectState{}, fmt.Errorf("project content is %d bytes; maximum is %d", totalBytes, maxProjectTotalBytes)
 		}
 		seen[seenKey] = struct{}{}
 		files = append(files, ProjectFile{Path: clean, Content: file.Content})
@@ -349,11 +402,59 @@ func isReservedWindowsName(pathPart string) bool {
 
 func isSourceLike(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".c", ".h":
+	case ".c", ".h", ".inc":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateCompilerArgsLength(value string) error {
+	if len([]byte(value)) > maxCompilerArgsBytes {
+		return fmt.Errorf("compiler arguments are %d bytes; maximum is %d", len([]byte(value)), maxCompilerArgsBytes)
+	}
+	return nil
+}
+
+func (p *ProjectStore) writeProjectFileAtomically(path string, data []byte, perm fs.FileMode) error {
+	if err := ensurePathInside(p.dir, path); err != nil {
+		return err
+	}
+	return writeFileAtomically(path, data, perm)
+}
+
+func writeFileAtomically(path string, data []byte, perm fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func ensurePathInside(root, target string) error {

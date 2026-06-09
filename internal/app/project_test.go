@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,98 @@ func TestProjectStoreRejectsUnsafeCompilerArgsForCompileCommands(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "compile_commands.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("compile_commands.json was written after rejected compiler args: %v", err)
 	}
+}
+
+func TestProjectStoreSyncRejectsEmptyFiles(t *testing.T) {
+	dir := t.TempDir()
+	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	if err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "main.c",
+		Content: "int main(void){return 0;}\n",
+	}}}); err != nil {
+		t.Fatalf("initial Sync failed: %v", err)
+	}
+
+	if err := store.Sync(ProjectState{}); err == nil {
+		t.Fatal("Sync accepted empty files")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.c")); err != nil {
+		t.Fatalf("existing file missing after rejected empty sync: %v", err)
+	}
+}
+
+func TestProjectStoreSyncWritesBeforeDeletingOldFiles(t *testing.T) {
+	dir := t.TempDir()
+	store := NewProjectStore(dir, filepath.Join(dir, "include"), filepath.Join(dir, "system-include"), "clang")
+	if err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "old.c",
+		Content: "int old(void){return 1;}\n",
+	}}}); err != nil {
+		t.Fatalf("initial Sync failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "blocked"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Sync(ProjectState{Files: []ProjectFile{{
+		Path:    "blocked/new.c",
+		Content: "int newer(void){return 2;}\n",
+	}}})
+	if err == nil {
+		t.Fatal("Sync succeeded despite blocked parent path")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "old.c")); statErr != nil {
+		t.Fatalf("old file was deleted before failed write: %v", statErr)
+	}
+}
+
+func TestNormalizeStateRejectsProjectLimits(t *testing.T) {
+	t.Run("too many files", func(t *testing.T) {
+		files := make([]ProjectFile, maxProjectFiles+1)
+		for i := range files {
+			files[i] = ProjectFile{
+				Path:    fmt.Sprintf("file%03d.c", i),
+				Content: "int x;\n",
+			}
+		}
+		if _, err := normalizeState(ProjectState{Files: files}); err == nil {
+			t.Fatal("normalizeState accepted too many files")
+		}
+	})
+
+	t.Run("single file too large", func(t *testing.T) {
+		if _, err := normalizeState(ProjectState{Files: []ProjectFile{{
+			Path:    "main.c",
+			Content: strings.Repeat("x", maxProjectFileBytes+1),
+		}}}); err == nil {
+			t.Fatal("normalizeState accepted oversized file")
+		}
+	})
+
+	t.Run("total content too large", func(t *testing.T) {
+		files := make([]ProjectFile, 5)
+		for i := range files {
+			files[i] = ProjectFile{
+				Path:    fmt.Sprintf("file%03d.c", i),
+				Content: strings.Repeat("x", maxProjectFileBytes),
+			}
+		}
+		if _, err := normalizeState(ProjectState{Files: files}); err == nil {
+			t.Fatal("normalizeState accepted oversized project content")
+		}
+	})
+
+	t.Run("compiler args too long", func(t *testing.T) {
+		if _, err := normalizeState(ProjectState{
+			CompilerArgs: strings.Repeat("x", maxCompilerArgsBytes+1),
+			Files: []ProjectFile{{
+				Path:    "main.c",
+				Content: "int main(void){return 0;}\n",
+			}},
+		}); err == nil {
+			t.Fatal("normalizeState accepted oversized compiler args")
+		}
+	})
 }
 
 func TestProjectStoreCompileCommandsUseNormalizedCompilerArgPaths(t *testing.T) {
@@ -228,5 +321,47 @@ func TestProjectStoreLoadRefreshesCompileCommands(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "new-clang") || strings.Contains(string(data), "stale") {
 		t.Fatalf("compile_commands.json was not refreshed: %s", string(data))
+	}
+}
+
+func TestIncludeSourceCommandsCapsSourceFiles(t *testing.T) {
+	dir := t.TempDir()
+	includeDir := filepath.Join(dir, "include")
+	for i := 0; i < maxIncludeSourceCommandFiles+3; i++ {
+		writeTestFile(t, includeDir, fmt.Sprintf("file%03d.c", i), "int value(void){return 1;}\n")
+	}
+	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
+
+	commands, err := store.includeSourceCommands(nil)
+	if err != nil {
+		t.Fatalf("includeSourceCommands failed: %v", err)
+	}
+	if len(commands) != maxIncludeSourceCommandFiles {
+		t.Fatalf("include source command count = %d, want %d", len(commands), maxIncludeSourceCommandFiles)
+	}
+}
+
+func TestIncludeSourceCommandsSkipsSymlinkSources(t *testing.T) {
+	dir := t.TempDir()
+	includeDir := filepath.Join(dir, "include")
+	outsideDir := t.TempDir()
+	writeTestFile(t, includeDir, "real.c", "int real(void){return 1;}\n")
+	writeTestFile(t, outsideDir, "linked.c", "int linked(void){return 2;}\n")
+	if err := os.Symlink(filepath.Join(outsideDir, "linked.c"), filepath.Join(includeDir, "linked.c")); err != nil {
+		t.Skipf("Symlink not available: %v", err)
+	}
+	store := NewProjectStore(dir, includeDir, filepath.Join(dir, "system-include"), "clang")
+
+	commands, err := store.includeSourceCommands(nil)
+	if err != nil {
+		t.Fatalf("includeSourceCommands failed: %v", err)
+	}
+	for _, command := range commands {
+		if strings.EqualFold(filepath.Base(command.File), "linked.c") {
+			t.Fatalf("includeSourceCommands included symlink source: %#v", commands)
+		}
+	}
+	if len(commands) != 1 || !strings.EqualFold(filepath.Base(commands[0].File), "real.c") {
+		t.Fatalf("includeSourceCommands = %#v, want only real.c", commands)
 	}
 }

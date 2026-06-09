@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,59 @@ func TestReadAllowedSourceAllowsSystemIncludes(t *testing.T) {
 	}
 	if resp.Path != "external/system/stdio.h" {
 		t.Fatalf("Path = %q, want external/system/stdio.h", resp.Path)
+	}
+}
+
+func TestReadAllowedSourceAllowsIncFiles(t *testing.T) {
+	projectDir := t.TempDir()
+	includeDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	writeTestFile(t, projectDir, "macros.inc", "#define VALUE 1\n")
+
+	server := &Server{cfg: Config{
+		ProjectDir:       projectDir,
+		IncludeDir:       includeDir,
+		SystemIncludeDir: systemIncludeDir,
+	}}
+	path := filepath.Join(projectDir, "macros.inc")
+	resp, err := server.readAllowedSource(pathToTestFileURI(path), path)
+	if err != nil {
+		t.Fatalf("readAllowedSource failed: %v", err)
+	}
+	if resp.Path != "macros.inc" || resp.Content == "" {
+		t.Fatalf("unexpected source response: %#v", resp)
+	}
+}
+
+func TestReadAllowedSourceRejectsMetadataNonSourceBinaryAndOversized(t *testing.T) {
+	projectDir := t.TempDir()
+	includeDir := t.TempDir()
+	systemIncludeDir := t.TempDir()
+	server := &Server{cfg: Config{
+		ProjectDir:       projectDir,
+		IncludeDir:       includeDir,
+		SystemIncludeDir: systemIncludeDir,
+	}}
+	cases := []struct {
+		name    string
+		rel     string
+		content string
+	}{
+		{name: "project metadata", rel: "project.json", content: "{}"},
+		{name: "compile commands", rel: "compile_commands.json", content: "[]"},
+		{name: "run metadata", rel: ".mini-godbolt-run/output.c", content: "int x;\n"},
+		{name: "non source", rel: "notes.txt", content: "notes\n"},
+		{name: "binary", rel: "binary.c", content: "int x;\x00\n"},
+		{name: "oversized", rel: "huge.c", content: strings.Repeat("x", maxSourceReadBytes+1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTestFile(t, projectDir, tc.rel, tc.content)
+			path := filepath.Join(projectDir, filepath.FromSlash(tc.rel))
+			if _, err := server.readAllowedSource(pathToTestFileURI(path), path); err == nil {
+				t.Fatalf("readAllowedSource accepted %s", tc.rel)
+			}
+		})
 	}
 }
 

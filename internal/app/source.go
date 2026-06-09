@@ -1,8 +1,9 @@
 package app
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,9 +23,11 @@ type SourceReadResponse struct {
 	ReadOnly bool   `json:"readOnly"`
 }
 
+const maxSourceReadBytes = 512 << 10
+
 func (s *Server) handleSourceRead(w http.ResponseWriter, r *http.Request) {
 	var req SourceReadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(w, r, maxSourceReadBodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -48,6 +51,9 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 	}
 
 	if rel, ok := pathRelIfInside(s.cfg.ProjectDir, absPath); ok {
+		if err := validateReadableSourceRel(rel); err != nil {
+			return SourceReadResponse{}, err
+		}
 		data, err := readRegularSourceFile(absPath)
 		if err != nil {
 			return SourceReadResponse{}, err
@@ -61,6 +67,9 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 	}
 
 	if rel, ok := pathRelIfInside(s.cfg.IncludeDir, absPath); ok {
+		if err := validateReadableSourceRel(rel); err != nil {
+			return SourceReadResponse{}, err
+		}
 		data, err := readRegularSourceFile(absPath)
 		if err != nil {
 			return SourceReadResponse{}, err
@@ -74,6 +83,9 @@ func (s *Server) readAllowedSource(uri, path string) (SourceReadResponse, error)
 	}
 
 	if rel, ok := pathRelIfInside(s.cfg.SystemIncludeDir, absPath); ok {
+		if err := validateReadableSourceRel(rel); err != nil {
+			return SourceReadResponse{}, err
+		}
 		data, err := readRegularSourceFile(absPath)
 		if err != nil {
 			return SourceReadResponse{}, err
@@ -107,15 +119,52 @@ func pathRelIfInside(root, target string) (string, bool) {
 	return rel, true
 }
 
+func validateReadableSourceRel(rel string) error {
+	slashed := strings.ToLower(filepath.ToSlash(rel))
+	switch slashed {
+	case "project.json", "compile_commands.json", ".mini-godbolt-run":
+		return fmt.Errorf("source URI points to project metadata")
+	}
+	if strings.HasPrefix(slashed, ".mini-godbolt-run/") {
+		return fmt.Errorf("source URI points to project metadata")
+	}
+	if !isSourceLike(rel) {
+		return fmt.Errorf("source URI has unsupported file extension")
+	}
+	return nil
+}
+
 func readRegularSourceFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("source URI is not a regular file")
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("source URI is not a regular file")
 	}
-	return os.ReadFile(path)
+	if info.Size() > maxSourceReadBytes {
+		return nil, fmt.Errorf("source URI is %d bytes; maximum is %d", info.Size(), maxSourceReadBytes)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSourceReadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSourceReadBytes {
+		return nil, fmt.Errorf("source URI exceeds %d bytes", maxSourceReadBytes)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return nil, fmt.Errorf("source URI appears to be binary")
+	}
+	return data, nil
 }
 
 func fileURIToPath(raw string) (string, error) {
